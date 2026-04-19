@@ -1,0 +1,25 @@
+# Basic IDOR scan — single authenticated user sweeping numeric IDs.
+# Starting point: does the app leak resources to an authenticated-but-unauthorized user?
+
+target:
+  base_url: "http://target.local"
+
+auth:
+  users:
+    - name: attacker
+      cookies:
+        session: "REPLACE_WITH_YOUR_LOW_PRIV_SESSION"
+
+scans:
+  - name: "invoice enumeration"
+    endpoint: "/api/invoices/{id}"
+    methods: [GET]
+    ids:
+      type: numeric
+      range: [1, 500]
+    baseline_user: attacker
+    include_unauth: true
+
+options:
+  rate_limit: 5    # req/sec — be polite
+  timeout: 10

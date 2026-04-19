@@ -1,0 +1,224 @@
+# idor-hunter
+
+> Automated IDOR enumeration and permission-anomaly detection for authorized web-app security testing.
+
+[![tests](https://github.com/11lunaric11/idor-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/11lunaric11/idor-hunter/actions)
+[![python](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+`idor-hunter` iterates object IDs across an API, replays each request as multiple users (and unauthenticated), diffs the responses, and flags access-control anomalies that look like Insecure Direct Object References (IDORs).
+
+It is **not** a fuzzer. It is a focused tool for the one thing that catches ~80% of real-world horizontal privilege-escalation bugs: *"does user B get a meaningful response for an ID that only belongs to user A?"*
+
+## Sample output
+
+![sample report screenshot](docs/sample-report.png)
+
+10 findings (5 critical, 5 high) from a scan against a deliberately vulnerable test API. See [examples/sample-report/report.html](examples/sample-report/report.html) for the full report.
+
+---
+
+## ⚠️ Authorized testing only
+
+This tool is for use on targets where you have **explicit written authorization** to perform security testing (bug bounty programs with an in-scope declaration, CTFs like TryHackMe / HackTheBox, your employer's staging systems, your own applications). Scanning systems you don't own or aren't authorized to test is illegal in most jurisdictions. You are responsible for how you use this.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/11lunaric11/idor-hunter.git
+cd idor-hunter
+pip install -e .
+```
+
+Or with dev dependencies for running the test suite:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## Quick start
+
+```bash
+# 1. Copy an example config and fill in your cookies
+cp examples/multi-user.yaml my-scan.yaml
+$EDITOR my-scan.yaml
+
+# 2. Run
+idor-hunter -c my-scan.yaml -o ./results
+
+# 3. Open results/report.html in your browser
+```
+
+The CLI prints a live progress bar and writes three artifacts:
+
+| File | What it is |
+|------|-----------|
+| `report.html` | Human-readable report, self-contained, share with the client |
+| `findings.json` | Machine-readable findings for piping into other tools |
+| `probes.csv` | Every single request/response — grep it, pivot it, keep it for evidence |
+
+Exit code is `1` if any `critical` or `high` finding was raised, so you can wire this into CI against a staging environment.
+
+---
+
+## Sample report
+
+A demo HTML report built from synthetic data lives in [`examples/sample-report/report.html`](examples/sample-report/report.html) — open it in a browser to see exactly what the output looks like. It showcases all three finding types with realistic-looking evidence.
+
+## Methodology
+
+The tool codifies the manual IDOR-hunting workflow. If you understand *why* it asks for what it asks for, you'll get better results.
+
+### The core insight
+
+Access-control bugs aren't found by looking at a single response. They're found by **comparing** responses. Specifically, by comparing:
+
+1. **Across users** — does user B get A's data?
+2. **Across auth states** — does the unauthenticated request get *any* data?
+3. **Across HTTP verbs** — is `GET /foo/123` denied but `PUT /foo/123` allowed?
+
+A scanner that looks at responses in isolation can only ever flag obvious stuff (500s, stack traces). Cross-referencing is what surfaces the subtle bugs.
+
+### The three checks
+
+**Check 1 — Cross-user content match (the classic IDOR).**
+For each `(endpoint, id)` pair, the scanner fires the request as the baseline user (who should own the resource) and as each test user. If a test user gets back a response that matches the baseline's — identical SHA-1, or length within 10% to tolerate CSRF tokens and timestamps — that's an IDOR. Severity is `high` for `GET`, `critical` for write verbs.
+
+**Check 2 — Unauthenticated access.**
+Every scan also fires an unauthenticated request by default. If the unauthenticated request returns 200 with a substantive body (≥50 bytes, not `204 No Content`), the endpoint is leaking data to the world. This catches the "we forgot to add the auth middleware to this route" class of bug.
+
+**Check 3 — Write-without-read.**
+For write verbs (`PUT`, `PATCH`, `DELETE`, `POST`), the analyzer cross-references the same user's `GET` for the same ID. If `GET` returned 403 but `PUT` succeeded, the write path skipped the ownership check — a critical privilege-escalation seam. This is a surprisingly common pattern in frameworks where `@requires_ownership` is only applied to read views.
+
+### Why two users, not one
+
+Scanning with a single account can only catch unauthenticated leaks and trivially broken endpoints. The high-signal bugs are horizontal: Alice can read Bob's data. You need both accounts, and you need Alice to have created some resources first so you have real IDs to point Bob at. The `multi-user.yaml` example shows this workflow.
+
+### Why numeric AND UUID support
+
+If the app uses incrementing integer IDs, a range sweep finds everything. If the app uses UUIDs, you can't enumerate them — but you can still test IDORs using UUIDs you've harvested from other sources (URLs shared in emails, IDs returned by *other* API calls, references in the JS bundle). The `list` ID type is for replaying a curated set of known IDs.
+
+### What it deliberately doesn't do
+
+- **No brute-force** — it's a diffing tool, not a fuzzer. Use `ffuf` / `wfuzz` for wordlist-based content discovery.
+- **No exploitation** — findings describe the anomaly, they don't dump victim data or modify records (beyond the probe requests themselves).
+- **No auth flow automation** — you paste in session cookies or bearer tokens. Handling every custom login flow is a rabbit hole; capturing a session in Burp and dropping it in YAML takes 30 seconds.
+- **No CAPTCHA bypass**, no proxy rotation, none of that. Tool stays in its lane.
+
+### Known limitations
+
+- **Rate-limited APIs** may return 429s that look like denials. Tune `options.rate_limit` down.
+- **Idempotent write verbs** — `PUT` and `DELETE` *actually modify things*. Only enable them on test data you don't care about, or on a staging clone. The tool won't stop you from DELETE-ing production records; that's on you.
+- **Length-drift heuristic** (10% tolerance) occasionally flags legitimately-different-but-similar responses as matches. Review findings, don't rubber-stamp them. The report surfaces the exact hashes and lengths so you can check.
+- **No JS rendering.** This tool hits HTTP endpoints directly. For SPA-heavy apps you still need to reverse-engineer the API from the network tab first.
+
+---
+
+## Config reference
+
+Full config schema, all fields optional unless marked required:
+
+```yaml
+target:
+  base_url: "http://target.local"    # REQUIRED
+
+auth:
+  users:                              # each user is an identity to probe as
+    - name: alice                     # REQUIRED (referenced by scans)
+      cookies:
+        session: "..."
+      headers:
+        Authorization: "Bearer ..."
+        X-CSRF-Token: "..."
+
+scans:                                # REQUIRED, at least one
+  - name: "invoice enumeration"       # REQUIRED, shows up in the report
+    endpoint: "/api/invoice/{id}"     # REQUIRED, must contain {id}
+    methods: [GET, PUT, DELETE]       # default: [GET]
+    ids:                              # REQUIRED
+      type: numeric                   # or "list"
+      range: [1, 500]                 # for numeric
+      # values: ["uuid-a", "uuid-b"]  # for list
+    baseline_user: alice              # the "owner" — optional if only testing unauth
+    test_users: [bob, carol]          # users who should NOT have access
+    include_unauth: true              # also fire with no auth (default: true)
+    body:                             # for POST/PUT/PATCH
+      some: field
+
+options:
+  rate_limit: 10        # req/sec (0 = unlimited, default 10)
+  timeout: 10           # seconds
+  resume: false         # write probes.jsonl as we go, crash-safe
+  verify_tls: true      # set false for self-signed certs in labs
+  max_retries: 2        # per-request retry on network errors
+```
+
+---
+
+## Output format
+
+### findings.json
+
+```json
+{
+  "generated_at": "2026-04-19T20:15:00+00:00",
+  "findings": [
+    {
+      "severity": "critical",
+      "kind": "unauth_access",
+      "title": "Unauthenticated access to GET invoice enumeration",
+      "description": "The endpoint returned a 200 with 1247 bytes ...",
+      "scan": "invoice enumeration",
+      "method": "GET",
+      "url": "http://target.local/api/invoice/42",
+      "id": "42",
+      "evidence": { "status": 200, "length": 1247, "hash": "a1b2c3...", "preview": "..." }
+    }
+  ]
+}
+```
+
+### Finding kinds
+
+| Kind | Severity | Meaning |
+|------|----------|---------|
+| `unauth_access` | critical | Endpoint serves data to unauthenticated clients |
+| `idor_write` | critical | Non-owner can `PUT`/`DELETE`/`PATCH`/`POST` owner's resource |
+| `write_without_read` | critical | Write succeeds for a user whose read returns 403 |
+| `idor_read` | high | Non-owner can `GET` owner's resource |
+
+---
+
+## Development
+
+```bash
+# Install with dev deps
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run a scan against a local test target
+python -m idor_hunter -c examples/basic.yaml -o ./out
+```
+
+The project is laid out so the pieces are swappable:
+- `scanner.py` only does I/O — produces `Probe` records
+- `analyzer.py` only consumes `Probe` records — produces `Finding` records
+- `reporter.py` only consumes `Finding` records — produces files
+
+Want to add a check? Add a function in `analyzer.py`. Want to add an output format? Add a writer in `reporter.py`. The data contract between layers is stable.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Acknowledgements
+
+- OWASP's [Testing for IDOR](https://owasp.org/www-project-web-security-testing-guide/) guide
+- PortSwigger's [Authorize](https://portswigger.net/bappstore/f9bbac8c4acf4aefa4d7dc92a991af2f) Burp extension, which does this workflow interactively and inspired the two-user diff approach

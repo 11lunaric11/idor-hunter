@@ -1,0 +1,69 @@
+# Two-account IDOR hunt — the gold standard for catching horizontal privilege escalation.
+#
+# Methodology:
+#   1. Register two accounts (alice, bob) on the target.
+#   2. Have alice create some resources (invoices, orders, profiles).
+#   3. Run this scan — alice is the "owner baseline", bob is the attacker.
+#   4. If bob gets the same responses as alice for alice's resource IDs, that's IDOR.
+#
+# Also tests multiple HTTP verbs: a common pattern is read-access gated but
+# write-access wide open.
+
+target:
+  base_url: "http://target.local"
+
+auth:
+  users:
+    - name: alice
+      cookies:
+        session: "ALICE_SESSION_COOKIE"
+      headers:
+        X-CSRF-Token: "ALICE_CSRF"
+    - name: bob
+      cookies:
+        session: "BOB_SESSION_COOKIE"
+      headers:
+        X-CSRF-Token: "BOB_CSRF"
+
+scans:
+  # Read IDOR on invoices — classic horizontal privesc
+  - name: "invoice horizontal privesc"
+    endpoint: "/api/invoices/{id}"
+    methods: [GET]
+    ids:
+      type: numeric
+      range: [1, 200]
+    baseline_user: alice
+    test_users: [bob]
+    include_unauth: true
+
+  # Write IDOR — sometimes you can't read but CAN modify
+  - name: "invoice write probe"
+    endpoint: "/api/invoices/{id}"
+    methods: [PUT, DELETE]
+    ids:
+      type: numeric
+      range: [1, 50]
+    baseline_user: alice
+    test_users: [bob]
+    include_unauth: false
+    body:
+      note: "probe"
+
+  # UUID-based resources — harvested from elsewhere (emails, JS bundles)
+  - name: "shared documents"
+    endpoint: "/api/docs/{id}"
+    methods: [GET]
+    ids:
+      type: list
+      values:
+        - "b8f3c2a1-4d5e-4a8b-9c0f-123456789abc"
+        - "e7a9d1f2-3b4c-5d6e-7f8a-9b0c1d2e3f4a"
+    baseline_user: alice
+    test_users: [bob]
+
+options:
+  rate_limit: 10
+  timeout: 10
+  resume: true     # write probes.jsonl as we go (crash-safe log)
+  verify_tls: true

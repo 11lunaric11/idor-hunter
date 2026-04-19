@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>idor-hunter report — demo-scan.yaml</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #151b23;
+    --panel-2: #1c232d;
+    --border: #2a3340;
+    --text: #e6e9ef;
+    --muted: #8b95a5;
+    --accent: #5eead4;
+    --critical: #f87171;
+    --high: #fb923c;
+    --medium: #fbbf24;
+    --low: #60a5fa;
+    --info: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding-bottom: 18px; border-bottom: 1px solid var(--border); margin-bottom: 28px;
+  }
+  header h1 {
+    margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.2px;
+  }
+  header h1 .tag { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  header .meta { color: var(--muted); font-size: 12px; text-align: right; }
+
+  .summary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 28px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .v { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card.critical .v { color: var(--critical); }
+  .card.high .v { color: var(--high); }
+  .card.medium .v { color: var(--medium); }
+  .card.low .v { color: var(--low); }
+
+  h2 {
+    font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--muted); margin: 32px 0 14px; border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  .finding {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .finding-head {
+    display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+    cursor: pointer; user-select: none;
+  }
+  .finding-head:hover { background: var(--panel-2); }
+  .sev {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    padding: 4px 8px; border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    flex-shrink: 0;
+  }
+  .sev.critical { background: rgba(248,113,113,0.15); color: var(--critical); }
+  .sev.high     { background: rgba(251,146,60,0.15);  color: var(--high); }
+  .sev.medium   { background: rgba(251,191,36,0.15);  color: var(--medium); }
+  .sev.low      { background: rgba(96,165,250,0.15);  color: var(--low); }
+  .sev.info     { background: rgba(148,163,184,0.15); color: var(--info); }
+  .finding-title { font-weight: 500; flex: 1; }
+  .finding-meta { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+
+  .finding-body {
+    padding: 0 16px 16px; border-top: 1px solid var(--border); display: none;
+  }
+  .finding.open .finding-body { display: block; }
+  .finding-body p { margin: 14px 0; color: var(--text); }
+  .finding-body .url {
+    display: block; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--accent); background: var(--bg); padding: 8px 10px; border-radius: 4px;
+    word-break: break-all; margin: 10px 0;
+  }
+  .evidence {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; color: var(--muted); white-space: pre; overflow-x: auto;
+    line-height: 1.5;
+  }
+
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 8px;
+  }
+  .status-chip {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    text-align: center;
+  }
+  .status-chip .code { color: var(--accent); font-weight: 600; }
+  .status-chip .count { color: var(--muted); margin-left: 6px; }
+
+  .empty {
+    text-align: center; padding: 40px; color: var(--muted);
+    background: var(--panel); border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .empty .big { font-size: 32px; margin-bottom: 8px; }
+
+  footer {
+    margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>idor-hunter <span class="tag">report</span></h1>
+  <div class="meta">
+    config: demo-scan.yaml<br>
+    generated: 2026-04-19 20:24:34 UTC
+  </div>
+</header>
+
+<div class="summary">
+  <div class="card">
+    <div class="k">Probes sent</div>
+    <div class="v">11</div>
+  </div>
+  <div class="card">
+    <div class="k">Findings</div>
+    <div class="v">3</div>
+  </div>
+  <div class="card critical">
+    <div class="k">Critical</div>
+    <div class="v">2</div>
+  </div>
+  <div class="card high">
+    <div class="k">High</div>
+    <div class="v">1</div>
+  </div>
+  <div class="card medium">
+    <div class="k">Medium</div>
+    <div class="v">0</div>
+  </div>
+  <div class="card">
+    <div class="k">Errors</div>
+    <div class="v">0</div>
+  </div>
+</div>
+
+<h2>HTTP status distribution</h2>
+<div class="status-grid">
+  
+  <div class="status-chip">
+    <span class="code">200</span><span class="count">× 7</span>
+  </div>
+  
+  <div class="status-chip">
+    <span class="code">401</span><span class="count">× 2</span>
+  </div>
+  
+  <div class="status-chip">
+    <span class="code">403</span><span class="count">× 2</span>
+  </div>
+  
+</div>
+
+<h2>Findings</h2>
+
+  
+  <div class="finding">
+    <div class="finding-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="sev critical">critical</span>
+      <span class="finding-title">&#x27;bob&#x27; can DELETE id=7 but GET returns 403</span>
+      <span class="finding-meta">DELETE · id=7</span>
+    </div>
+    <div class="finding-body">
+      <p>Access control is inconsistent across HTTP verbs. The user cannot read the resource (GET → 403) but the DELETE succeeded with status 200. This is a classic authorization seam — the write path likely skips the ownership check.</p>
+      <span class="url">http://demo.local/api/orders/7</span>
+      <div class="evidence">{
+  &quot;write_status&quot;: 200,
+  &quot;read_status&quot;: 403
+}</div>
+    </div>
+  </div>
+  
+  <div class="finding">
+    <div class="finding-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="sev critical">critical</span>
+      <span class="finding-title">Unauthenticated access to GET public health check</span>
+      <span class="finding-meta">GET · id=1</span>
+    </div>
+    <div class="finding-body">
+      <p>The endpoint returned a 200 with 512 bytes of content to an unauthenticated request. Resources expecting authentication should return 401/403.</p>
+      <span class="url">http://demo.local/api/internal/users/1</span>
+      <div class="evidence">{
+  &quot;status&quot;: 200,
+  &quot;length&quot;: 512,
+  &quot;hash&quot;: &quot;leakhash&quot;,
+  &quot;preview&quot;: &quot;{\&quot;users\&quot;:[\&quot;alice\&quot;,\&quot;bob\&quot;,\&quot;admin\&quot;]}&quot;
+}</div>
+    </div>
+  </div>
+  
+  <div class="finding">
+    <div class="finding-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="sev high">high</span>
+      <span class="finding-title">IDOR: user &#x27;bob&#x27; can GET resource owned by &#x27;alice&#x27;</span>
+      <span class="finding-meta">GET · id=42</span>
+    </div>
+    <div class="finding-body">
+      <p>Both users received functionally identical responses (hash match or &lt;10% length drift). This indicates &#x27;bob&#x27; has unauthorized GET access to a resource that appears to belong to &#x27;alice&#x27;.</p>
+      <span class="url">http://demo.local/api/invoice/42</span>
+      <div class="evidence">{
+  &quot;owner_status&quot;: 200,
+  &quot;owner_length&quot;: 1247,
+  &quot;owner_hash&quot;: &quot;a1b2c3d4&quot;,
+  &quot;attacker_status&quot;: 200,
+  &quot;attacker_length&quot;: 1247,
+  &quot;attacker_hash&quot;: &quot;a1b2c3d4&quot;
+}</div>
+    </div>
+  </div>
+  
+
+
+<footer>
+  idor-hunter · authorized security testing only · click any finding to expand
+</footer>
+
+</div>
+</body>
+</html>

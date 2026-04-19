@@ -1,0 +1,53 @@
+{
+  "generated_at": "2026-04-19T20:24:34.083022+00:00",
+  "findings": [
+    {
+      "severity": "critical",
+      "kind": "write_without_read",
+      "title": "'bob' can DELETE id=7 but GET returns 403",
+      "description": "Access control is inconsistent across HTTP verbs. The user cannot read the resource (GET \u2192 403) but the DELETE succeeded with status 200. This is a classic authorization seam \u2014 the write path likely skips the ownership check.",
+      "scan": "order write test",
+      "method": "DELETE",
+      "url": "http://demo.local/api/orders/7",
+      "id": "7",
+      "evidence": {
+        "write_status": 200,
+        "read_status": 403
+      }
+    },
+    {
+      "severity": "critical",
+      "kind": "unauth_access",
+      "title": "Unauthenticated access to GET public health check",
+      "description": "The endpoint returned a 200 with 512 bytes of content to an unauthenticated request. Resources expecting authentication should return 401/403.",
+      "scan": "public health check",
+      "method": "GET",
+      "url": "http://demo.local/api/internal/users/1",
+      "id": "1",
+      "evidence": {
+        "status": 200,
+        "length": 512,
+        "hash": "leakhash",
+        "preview": "{\"users\":[\"alice\",\"bob\",\"admin\"]}"
+      }
+    },
+    {
+      "severity": "high",
+      "kind": "idor_read",
+      "title": "IDOR: user 'bob' can GET resource owned by 'alice'",
+      "description": "Both users received functionally identical responses (hash match or <10% length drift). This indicates 'bob' has unauthorized GET access to a resource that appears to belong to 'alice'.",
+      "scan": "invoice enumeration",
+      "method": "GET",
+      "url": "http://demo.local/api/invoice/42",
+      "id": "42",
+      "evidence": {
+        "owner_status": 200,
+        "owner_length": 1247,
+        "owner_hash": "a1b2c3d4",
+        "attacker_status": 200,
+        "attacker_length": 1247,
+        "attacker_hash": "a1b2c3d4"
+      }
+    }
+  ]
+}

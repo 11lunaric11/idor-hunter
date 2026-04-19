@@ -1,0 +1,215 @@
+"""HTTP scanning: iterate IDs, capture response fingerprints.
+
+The scanner's only job is to do the requests and produce `Probe` records.
+It doesn't interpret them — that's analyzer.py's job.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable
+
+import requests
+
+from .config import Config, Scan, User
+
+# Keep probe bodies capped so we don't blow up memory on big responses
+_MAX_BODY_CAPTURE = 4096
+
+
+@dataclass
+class Probe:
+    """A single request/response observation."""
+
+    scan: str
+    user: str  # "__unauth__" if no auth
+    method: str
+    url: str
+    id: str
+    status: int
+    length: int
+    content_hash: str
+    location: str
+    elapsed_ms: int
+    body_preview: str
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class RateLimiter:
+    """Simple token-bucket-ish limiter: ensures we don't exceed N req/sec."""
+
+    def __init__(self, per_second: float):
+        self.per_second = per_second
+        self._last = 0.0
+
+    def wait(self) -> None:
+        if self.per_second <= 0:
+            return
+        interval = 1.0 / self.per_second
+        now = time.monotonic()
+        delay = self._last + interval - now
+        if delay > 0:
+            time.sleep(delay)
+        self._last = time.monotonic()
+
+
+def _fingerprint(body: bytes) -> tuple[str, str]:
+    """Return (sha1-truncated, utf-8 preview)."""
+    digest = hashlib.sha1(body).hexdigest()[:12]
+    try:
+        preview = body[:_MAX_BODY_CAPTURE].decode("utf-8", errors="replace")
+    except Exception:
+        preview = ""
+    return digest, preview
+
+
+def _build_session(user: User | None, verify_tls: bool) -> requests.Session:
+    s = requests.Session()
+    s.verify = verify_tls
+    if user is not None:
+        for k, v in user.cookies.items():
+            s.cookies.set(k, v)
+        s.headers.update(user.headers)
+    # play nice: identify ourselves
+    s.headers.setdefault("User-Agent", "idor-hunter/0.1 (+authorized-testing-only)")
+    return s
+
+
+def _do_request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    timeout: float,
+    body: dict | None,
+    retries: int,
+) -> tuple[requests.Response | None, Exception | None]:
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            kwargs = {"timeout": timeout, "allow_redirects": False}
+            if body is not None and method in {"POST", "PUT", "PATCH"}:
+                kwargs["json"] = body
+            resp = session.request(method, url, **kwargs)
+            return resp, None
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(0.3 * (attempt + 1))
+    return None, last_err
+
+
+def _probes_for_scan(
+    scan: Scan,
+    config: Config,
+    progress_cb=None,
+) -> Iterable[Probe]:
+    limiter = RateLimiter(config.options.rate_limit)
+
+    # Build the list of (user_or_None, label) that we want to probe as
+    identities: list[tuple[User | None, str]] = []
+    if scan.include_unauth:
+        identities.append((None, "__unauth__"))
+    if scan.baseline_user:
+        identities.append((config.user(scan.baseline_user), scan.baseline_user))
+    for tu in scan.test_users:
+        identities.append((config.user(tu), tu))
+
+    sessions = {label: _build_session(u, config.options.verify_tls) for u, label in identities}
+
+    ids = list(scan.ids.iter_ids())
+    total = len(ids) * len(identities) * len(scan.methods)
+    done = 0
+
+    try:
+        for id_value in ids:
+            url = config.base_url + scan.endpoint.replace("{id}", id_value)
+            for user_obj, label in identities:
+                session = sessions[label]
+                for method in scan.methods:
+                    limiter.wait()
+                    t0 = time.monotonic()
+                    resp, err = _do_request(
+                        session,
+                        method,
+                        url,
+                        timeout=config.options.timeout,
+                        body=scan.body,
+                        retries=config.options.max_retries,
+                    )
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                    if err is not None or resp is None:
+                        yield Probe(
+                            scan=scan.name,
+                            user=label,
+                            method=method,
+                            url=url,
+                            id=id_value,
+                            status=0,
+                            length=0,
+                            content_hash="",
+                            location="",
+                            elapsed_ms=elapsed_ms,
+                            body_preview="",
+                            error=str(err) if err else "no response",
+                        )
+                    else:
+                        digest, preview = _fingerprint(resp.content)
+                        yield Probe(
+                            scan=scan.name,
+                            user=label,
+                            method=method,
+                            url=url,
+                            id=id_value,
+                            status=resp.status_code,
+                            length=len(resp.content),
+                            content_hash=digest,
+                            location=resp.headers.get("Location", ""),
+                            elapsed_ms=elapsed_ms,
+                            body_preview=preview,
+                        )
+
+                    done += 1
+                    if progress_cb:
+                        progress_cb(done, total)
+    finally:
+        for s in sessions.values():
+            s.close()
+
+
+def run_scans(
+    config: Config,
+    progress_cb=None,
+    resume_path: Path | None = None,
+) -> list[Probe]:
+    """Run all scans and return every probe collected.
+
+    If resume_path is given, probes are appended to it as JSONL as we go,
+    so a killed run can in principle be restarted (the skip-already-done
+    logic lives in a future iteration — for now it's a crash-safe log).
+    """
+    all_probes: list[Probe] = []
+
+    resume_fh = None
+    if resume_path is not None:
+        resume_path.parent.mkdir(parents=True, exist_ok=True)
+        resume_fh = resume_path.open("a", encoding="utf-8")
+
+    try:
+        for scan in config.scans:
+            for probe in _probes_for_scan(scan, config, progress_cb=progress_cb):
+                all_probes.append(probe)
+                if resume_fh is not None:
+                    resume_fh.write(json.dumps(probe.to_dict()) + "\n")
+                    resume_fh.flush()
+    finally:
+        if resume_fh is not None:
+            resume_fh.close()
+
+    return all_probes

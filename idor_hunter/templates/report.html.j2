@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>idor-hunter report — {{ config_name|e }}</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #151b23;
+    --panel-2: #1c232d;
+    --border: #2a3340;
+    --text: #e6e9ef;
+    --muted: #8b95a5;
+    --accent: #5eead4;
+    --critical: #f87171;
+    --high: #fb923c;
+    --medium: #fbbf24;
+    --low: #60a5fa;
+    --info: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding-bottom: 18px; border-bottom: 1px solid var(--border); margin-bottom: 28px;
+  }
+  header h1 {
+    margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.2px;
+  }
+  header h1 .tag { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  header .meta { color: var(--muted); font-size: 12px; text-align: right; }
+
+  .summary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 28px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .v { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card.critical .v { color: var(--critical); }
+  .card.high .v { color: var(--high); }
+  .card.medium .v { color: var(--medium); }
+  .card.low .v { color: var(--low); }
+
+  h2 {
+    font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--muted); margin: 32px 0 14px; border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  .finding {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .finding-head {
+    display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+    cursor: pointer; user-select: none;
+  }
+  .finding-head:hover { background: var(--panel-2); }
+  .sev {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    padding: 4px 8px; border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    flex-shrink: 0;
+  }
+  .sev.critical { background: rgba(248,113,113,0.15); color: var(--critical); }
+  .sev.high     { background: rgba(251,146,60,0.15);  color: var(--high); }
+  .sev.medium   { background: rgba(251,191,36,0.15);  color: var(--medium); }
+  .sev.low      { background: rgba(96,165,250,0.15);  color: var(--low); }
+  .sev.info     { background: rgba(148,163,184,0.15); color: var(--info); }
+  .finding-title { font-weight: 500; flex: 1; }
+  .finding-meta { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+
+  .finding-body {
+    padding: 0 16px 16px; border-top: 1px solid var(--border); display: none;
+  }
+  .finding.open .finding-body { display: block; }
+  .finding-body p { margin: 14px 0; color: var(--text); }
+  .finding-body .url {
+    display: block; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--accent); background: var(--bg); padding: 8px 10px; border-radius: 4px;
+    word-break: break-all; margin: 10px 0;
+  }
+  .evidence {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; color: var(--muted); white-space: pre; overflow-x: auto;
+    line-height: 1.5;
+  }
+
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 8px;
+  }
+  .status-chip {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    text-align: center;
+  }
+  .status-chip .code { color: var(--accent); font-weight: 600; }
+  .status-chip .count { color: var(--muted); margin-left: 6px; }
+
+  .empty {
+    text-align: center; padding: 40px; color: var(--muted);
+    background: var(--panel); border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .empty .big { font-size: 32px; margin-bottom: 8px; }
+
+  footer {
+    margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>idor-hunter <span class="tag">report</span></h1>
+  <div class="meta">
+    {% if config_name %}config: {{ config_name|e }}<br>{% endif %}
+    generated: {{ generated_at|e }}
+  </div>
+</header>
+
+<div class="summary">
+  <div class="card">
+    <div class="k">Probes sent</div>
+    <div class="v">{{ probes_count }}</div>
+  </div>
+  <div class="card">
+    <div class="k">Findings</div>
+    <div class="v">{{ stats.total_findings }}</div>
+  </div>
+  <div class="card critical">
+    <div class="k">Critical</div>
+    <div class="v">{{ stats.by_severity.get('critical', 0) }}</div>
+  </div>
+  <div class="card high">
+    <div class="k">High</div>
+    <div class="v">{{ stats.by_severity.get('high', 0) }}</div>
+  </div>
+  <div class="card medium">
+    <div class="k">Medium</div>
+    <div class="v">{{ stats.by_severity.get('medium', 0) }}</div>
+  </div>
+  <div class="card">
+    <div class="k">Errors</div>
+    <div class="v">{{ stats.errors }}</div>
+  </div>
+</div>
+
+<h2>HTTP status distribution</h2>
+<div class="status-grid">
+  {% for code, count in stats.by_status.items() %}
+  <div class="status-chip">
+    <span class="code">{{ code }}</span><span class="count">× {{ count }}</span>
+  </div>
+  {% endfor %}
+</div>
+
+<h2>Findings</h2>
+{% if findings %}
+  {% for f in findings %}
+  <div class="finding">
+    <div class="finding-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="sev {{ f.severity }}">{{ f.severity }}</span>
+      <span class="finding-title">{{ f.title|e }}</span>
+      <span class="finding-meta">{{ f.method|e }} · id={{ f.id|e }}</span>
+    </div>
+    <div class="finding-body">
+      <p>{{ f.description|e }}</p>
+      <span class="url">{{ f.url|e }}</span>
+      <div class="evidence">{{ f.evidence|pretty_json|e }}</div>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">
+    <div class="big">✓</div>
+    <div>No findings. Either the target is well-configured, or the scan scope needs widening.</div>
+  </div>
+{% endif %}
+
+<footer>
+  idor-hunter · authorized security testing only · click any finding to expand
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idor-hunter"
+version = "0.1.0"
+description = "Automated IDOR enumeration and permission anomaly detection for authorized security testing."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Your Name" }]
+keywords = ["security", "pentesting", "idor", "owasp", "web-security"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+]
+dependencies = [
+  "requests>=2.31",
+  "PyYAML>=6.0",
+  "Jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "responses>=0.24",
+]
+
+[project.scripts]
+idor-hunter = "idor_hunter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/11lunaric11/idor-hunter"
+Issues = "https://github.com/11lunaric11/idor-hunter/issues"
+
+[tool.setuptools.packages.find]
+include = ["idor_hunter*"]
+
+[tool.setuptools.package-data]
+idor_hunter = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

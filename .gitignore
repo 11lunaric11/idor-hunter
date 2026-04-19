@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+.eggs/
+*.egg-info/
+*.egg
+build/
+dist/
+wheels/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# idor-hunter runtime output
+idor-results/
+*.jsonl
