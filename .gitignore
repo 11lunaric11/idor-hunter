@@ -34,3 +34,9 @@ htmlcov/
 idor-results/
 *.jsonl
 .claude/
+
+# Challenge-specific scan artifacts
+corridor-results/
+corridor-scan.yaml
+*-scan.yaml
+*-results/
