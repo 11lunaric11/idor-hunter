@@ -40,3 +40,5 @@ corridor-results/
 corridor-scan.yaml
 *-scan.yaml
 *-results/
+lab-test/
+lab-scan.yaml
