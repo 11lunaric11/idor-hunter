@@ -10,11 +10,13 @@
 
 It is **not** a fuzzer. It is a focused tool for the one thing that catches ~80% of real-world horizontal privilege-escalation bugs: *"does user B get a meaningful response for an ID that only belongs to user A?"*
 
+**Battle-tested:** see [the Corridor writeup](WRITEUP-corridor.md) for a real-world run, including a false-positive I discovered by dogfooding and queued for the next release.
+
 ## Sample output
 
 ![sample report screenshot](docs/sample-report.png)
 
-10 findings (5 critical, 5 high) from a scan against a deliberately vulnerable test API. See [examples/sample-report/report.html](examples/sample-report/report.html) for the full report.
+10 findings (5 critical, 5 high) from a scan against a deliberately vulnerable test API. A full demo report (built from synthetic data, showcases every finding type with realistic evidence) lives at [`examples/sample-report/report.html`](examples/sample-report/report.html).
 
 ---
 
@@ -43,6 +45,7 @@ pytest
 
 ```bash
 # 1. Copy an example config and fill in your cookies
+#    Start with basic.yaml (single user) or multi-user.yaml (two-account IDOR)
 cp examples/multi-user.yaml my-scan.yaml
 $EDITOR my-scan.yaml
 
@@ -52,7 +55,36 @@ idor-hunter -c my-scan.yaml -o ./results
 # 3. Open results/report.html in your browser
 ```
 
-The CLI prints a live progress bar and writes three artifacts:
+What a run looks like:
+
+```
+$ idor-hunter -c my-scan.yaml -o ./results
+
+  _       __                __               __
+ (_)___/ /___  _____      / /_  __  ______  / /____  _____
+/ / __  / __ \/ ___/_____/ __ \/ / / / __ \/ __/ _ \/ ___/
+/ / /_/ / /_/ / /  /_____/ / / / /_/ / / / / /_/  __/ /
+___/\__,_/\____/_/       /_/ /_/\__,_/_/ /_/\__/\___/_/
+        automated IDOR enumeration — authorized testing only
+
+  target:  http://target.local
+  users:   2
+  scans:   1
+  probes:  ~30
+  scanning [██████████████████████████████] 30/30 (100.0%)
+
+  probes:    30
+  findings:  10
+    critical 5
+    high     5
+
+  wrote to: results/
+    → report.html
+    → findings.json
+    → probes.csv
+```
+
+The CLI writes three artifacts:
 
 | File | What it is |
 |------|-----------|
@@ -62,11 +94,21 @@ The CLI prints a live progress bar and writes three artifacts:
 
 Exit code is `1` if any `critical` or `high` finding was raised, so you can wire this into CI against a staging environment.
 
+### CLI flags
+
+```
+idor-hunter -c CONFIG [-o OUT_DIR] [--harvest] [--no-html] [--no-csv] [--quiet]
+```
+
+| Flag | Effect |
+|------|--------|
+| `-c, --config` | Path to YAML scan config (required) |
+| `-o, --out-dir` | Output directory (default: `./idor-results`) |
+| `--harvest` | After first pass, extract UUIDs from response bodies and replay them as a second pass. Catches IDORs against resources you didn't know existed. |
+| `--no-html` / `--no-csv` | Skip HTML report or CSV probe dump |
+| `--quiet` | Suppress banner and progress bar |
+
 ---
-
-## Sample report
-
-A demo HTML report built from synthetic data lives in [`examples/sample-report/report.html`](examples/sample-report/report.html) — open it in a browser to see exactly what the output looks like. It showcases all three finding types with realistic-looking evidence.
 
 ## Methodology
 
@@ -82,7 +124,7 @@ Access-control bugs aren't found by looking at a single response. They're found 
 
 A scanner that looks at responses in isolation can only ever flag obvious stuff (500s, stack traces). Cross-referencing is what surfaces the subtle bugs.
 
-### The three checks
+### The four checks
 
 **Check 1 — Cross-user content match (the classic IDOR).**
 For each `(endpoint, id)` pair, the scanner fires the request as the baseline user (who should own the resource) and as each test user. If a test user gets back a response that matches the baseline's — identical SHA-1, or length within 10% to tolerate CSRF tokens and timestamps — that's an IDOR. Severity is `high` for `GET`, `critical` for write verbs.
@@ -93,13 +135,19 @@ Every scan also fires an unauthenticated request by default. If the unauthentica
 **Check 3 — Write-without-read.**
 For write verbs (`PUT`, `PATCH`, `DELETE`, `POST`), the analyzer cross-references the same user's `GET` for the same ID. If `GET` returned 403 but `PUT` succeeded, the write path skipped the ownership check — a critical privilege-escalation seam. This is a surprisingly common pattern in frameworks where `@requires_ownership` is only applied to read views.
 
+**Check 4 — Redirect matching.**
+Some apps don't return data bodies for denied requests — they 302 to `/login`, `/forbidden`, or similar. If the baseline user's 302 target matches the test user's 302 target (same `Location` header), both are being routed to the same destination regardless of ownership, which often indicates the same underlying resource was accessed. Works as a companion to Check 1: content match *or* redirect match flags the finding.
+
 ### Why two users, not one
 
-Scanning with a single account can only catch unauthenticated leaks and trivially broken endpoints. The high-signal bugs are horizontal: Alice can read Bob's data. You need both accounts, and you need Alice to have created some resources first so you have real IDs to point Bob at. The `multi-user.yaml` example shows this workflow.
+Scanning with a single account can only catch unauthenticated leaks and trivially broken endpoints. The high-signal bugs are horizontal: Alice can read Bob's data. You need both accounts, and you need Alice to have created some resources first so you have real IDs to point Bob at. The [`multi-user.yaml`](examples/multi-user.yaml) example shows this workflow; [`basic.yaml`](examples/basic.yaml) is the simpler starting point.
 
 ### Why numeric AND UUID support
 
-If the app uses incrementing integer IDs, a range sweep finds everything. If the app uses UUIDs, you can't enumerate them — but you can still test IDORs using UUIDs you've harvested from other sources (URLs shared in emails, IDs returned by *other* API calls, references in the JS bundle). The `list` ID type is for replaying a curated set of known IDs.
+If the app uses incrementing integer IDs, a range sweep finds everything. If the app uses UUIDs, you can't enumerate them — but you can:
+
+- Harvest them from other sources (URLs shared in emails, IDs returned by *other* API calls, references in the JS bundle) and drop them into `ids.type: list`
+- Run with `--harvest`, which scans first-pass responses for UUIDs and automatically replays every discovered one against all test users. This catches IDORs against resources your config didn't know existed.
 
 ### What it deliberately doesn't do
 
@@ -107,17 +155,21 @@ If the app uses incrementing integer IDs, a range sweep finds everything. If the
 - **No exploitation** — findings describe the anomaly, they don't dump victim data or modify records (beyond the probe requests themselves).
 - **No auth flow automation** — you paste in session cookies or bearer tokens. Handling every custom login flow is a rabbit hole; capturing a session in Burp and dropping it in YAML takes 30 seconds.
 - **No CAPTCHA bypass**, no proxy rotation, none of that. Tool stays in its lane.
+- **No authentication-bypass header probes** (`X-Forwarded-For`, `X-Original-URL`, etc.). That's a different vulnerability class with different semantics; mixing it into an IDOR tool would dilute the signal. If that's what you need, use a dedicated authz-bypass tool alongside this one.
 
-### Known limitations
+### Known gaps
+
+These are bugs and missing features, as opposed to the scope decisions above. Each one is a candidate for a future release; issues track individual fixes.
 
 - **Rate-limited APIs** may return 429s that look like denials. Tune `options.rate_limit` down.
 - **Idempotent write verbs** — `PUT` and `DELETE` *actually modify things*. Only enable them on test data you don't care about, or on a staging clone. The tool won't stop you from DELETE-ing production records; that's on you.
 - **Length-drift heuristic** (10% tolerance) occasionally flags legitimately-different-but-similar responses as matches. Review findings, don't rubber-stamp them. The report surfaces the exact hashes and lengths so you can check.
 - **No JS rendering.** This tool hits HTTP endpoints directly. For SPA-heavy apps you still need to reverse-engineer the API from the network tab first.
-- **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower `_SUBSTANTIVE_LENGTH` in `analyzer.py`.
+- **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower the `_SUBSTANTIVE_LENGTH` constant in `idor_hunter/analyzer.py`.
 - **Destructive verbs = inferred impact.** For `DELETE`/`PUT`, identical cross-user responses indicate a missing authz check but don't *confirm* the resource was mutated. Verify impact manually before reporting.
 - **No session refresh.** If the target session expires mid-scan, subsequent probes become 401s and findings will be wrong. Keep scans short or re-run with fresh cookies.
-- **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes). Harvesting only runs against scans with `ids.type: list`.
+- **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes match the pattern).
+- **False positives on no-auth targets.** Check 2 (`unauth_access`) fires on every substantive response when the scan has no authenticated identity (e.g. CTF hash-guessing rooms). The check assumes a multi-user threat model; a scan with only `__unauth__` as an identity shouldn't fire it. Discovered during the Corridor run — see the [writeup](WRITEUP-corridor.md). Queued for v0.3.
 
 ---
 
@@ -158,6 +210,7 @@ options:
   resume: false         # write probes.jsonl as we go, crash-safe
   verify_tls: true      # set false for self-signed certs in labs
   max_retries: 2        # per-request retry on network errors
+  harvest_ids: false    # enable UUID harvesting (also via --harvest CLI flag)
 ```
 
 ---
@@ -192,7 +245,15 @@ options:
 | `unauth_access` | critical | Endpoint serves data to unauthenticated clients |
 | `idor_write` | critical | Non-owner can `PUT`/`DELETE`/`PATCH`/`POST` owner's resource |
 | `write_without_read` | critical | Write succeeds for a user whose read returns 403 |
-| `idor_read` | high | Non-owner can `GET` owner's resource |
+| `idor_read` | high | Non-owner can `GET` owner's resource (content or redirect match) |
+
+Harvested IDs (from `--harvest`) surface as regular findings above, with the originating probe tracked in the `discovered_via` field of the underlying probe record.
+
+---
+
+## Real-world use
+
+- [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as an issue, queued for v0.3.
 
 ---
 
@@ -205,6 +266,9 @@ pip install -e ".[dev]"
 # Run tests
 pytest
 
+# Lint
+ruff check .
+
 # Run a scan against a local test target
 python -m idor_hunter -c examples/basic.yaml -o ./out
 ```
@@ -213,8 +277,13 @@ The project is laid out so the pieces are swappable:
 - `scanner.py` only does I/O — produces `Probe` records
 - `analyzer.py` only consumes `Probe` records — produces `Finding` records
 - `reporter.py` only consumes `Finding` records — produces files
+- `harvester.py` extracts replay candidates from probe responses
 
 Want to add a check? Add a function in `analyzer.py`. Want to add an output format? Add a writer in `reporter.py`. The data contract between layers is stable.
+
+## Changelog
+
+See the [releases page](https://github.com/11lunaric11/idor-hunter/releases) for version history.
 
 ---
 
