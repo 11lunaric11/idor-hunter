@@ -167,9 +167,8 @@ These are bugs and missing features, as opposed to the scope decisions above. Ea
 - **No JS rendering.** This tool hits HTTP endpoints directly. For SPA-heavy apps you still need to reverse-engineer the API from the network tab first.
 - **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower the `_SUBSTANTIVE_LENGTH` constant in `idor_hunter/analyzer.py`.
 - **Destructive verbs = inferred impact.** For `DELETE`/`PUT`, identical cross-user responses indicate a missing authz check but don't *confirm* the resource was mutated. Verify impact manually before reporting.
-- **No session refresh.** If the target session expires mid-scan, subsequent probes become 401s and findings will be wrong. Keep scans short or re-run with fresh cookies.
+- **No session refresh.** If the target session expires mid-scan, subsequent probes become 401s. Since v0.3 the analyzer detects this by comparing per-user denial density against the unauth baseline and emits a `session_expired` finding — but it can't refresh the cookie for you. Re-run with fresh auth.
 - **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes match the pattern).
-- **False positives on no-auth targets.** Check 2 (`unauth_access`) fires on every substantive response when the scan has no authenticated identity (e.g. CTF hash-guessing rooms). The check assumes a multi-user threat model; a scan with only `__unauth__` as an identity shouldn't fire it. Discovered during the Corridor run — see the [writeup](WRITEUP-corridor.md). Queued for v0.3.
 
 ---
 
@@ -253,7 +252,7 @@ Harvested IDs (from `--harvest`) surface as regular findings above, with the ori
 
 ## Real-world use
 
-- [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as an issue, queued for v0.3.
+- [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as an issue, fixed in v0.3.
 
 ---
 

@@ -172,6 +172,79 @@ def test_redirect_match_flags_idor():
     assert findings[0].evidence.get("match_via") == "redirect"
 
 
+def test_no_unauth_finding_when_only_unauth_identity():
+    """No-auth scans (e.g. CTF hash-guessing) shouldn't fire unauth_access.
+
+    Regression: before v0.3, Check 1 fired on every substantive 200 for
+    `__unauth__` — but when the scan has no authed baseline, every 200 is
+    expected. Real bug reported from TryHackMe Corridor run.
+    """
+    probes = [
+        _probe(user="__unauth__", status=200, length=500, content_hash="x"),
+        _probe(
+            user="__unauth__", id_="2", status=200, length=500, content_hash="y"
+        ),
+    ]
+    findings = analyze(probes)
+    assert not any(f.kind == "unauth_access" for f in findings)
+    # And we emit an info-level notice so the user sees *why* checks were skipped.
+    notices = [f for f in findings if f.kind == "no_auth_baseline"]
+    assert len(notices) == 1
+    assert notices[0].severity == "info"
+
+
+def test_session_expired_detection_fires():
+    """Authed user denied at same rate as unauth baseline → session expired."""
+    probes = []
+    # 15 probes per user, all 401 — alice's session is dead.
+    for i in range(15):
+        probes.append(
+            _probe(user="alice", id_=str(i), status=401, length=20, content_hash="")
+        )
+        probes.append(
+            _probe(
+                user="__unauth__",
+                id_=str(i),
+                status=401,
+                length=20,
+                content_hash="",
+            )
+        )
+    findings = analyze(probes)
+    expired = [f for f in findings if f.kind == "session_expired"]
+    assert len(expired) == 1
+    assert "alice" in expired[0].title
+
+
+def test_session_expired_does_not_fire_on_normal_denial_mix():
+    """User legitimately denied on some resources → not session-expired."""
+    probes = []
+    # alice gets 403 on half, 200 on half — normal access pattern.
+    # unauth gets 401 on all — correct denial behavior.
+    for i in range(20):
+        status = 200 if i < 10 else 403
+        probes.append(
+            _probe(
+                user="alice",
+                id_=str(i),
+                status=status,
+                length=500 if status == 200 else 20,
+                content_hash="x" if status == 200 else "",
+            )
+        )
+        probes.append(
+            _probe(
+                user="__unauth__",
+                id_=str(i),
+                status=401,
+                length=20,
+                content_hash="",
+            )
+        )
+    findings = analyze(probes)
+    assert not any(f.kind == "session_expired" for f in findings)
+
+
 def test_login_bounce_does_not_fire():
     """Both users 302 → /login is a denial signal, not an IDOR."""
     probes = [

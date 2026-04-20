@@ -112,8 +112,10 @@ def _probes_for_scan(
     scan: Scan,
     config: Config,
     progress_cb=None,
+    skip: set[tuple[str, str, str, str]] | None = None,
 ) -> Iterable[Probe]:
     limiter = RateLimiter(config.options.rate_limit)
+    skip = skip or set()
 
     # Build the list of (user_or_None, label) that we want to probe as.
     # Dedup by label so baseline_user accidentally listed in test_users
@@ -145,7 +147,16 @@ def _probes_for_scan(
     sessions = {label: _build_session(u, config.options.verify_tls) for u, label in identities}
 
     ids = list(scan.ids.iter_ids())
-    total = len(ids) * len(identities) * len(scan.methods)
+    # Total only counts probes we'll actually issue (post-skip), so the
+    # progress bar reflects remaining work, not work that was already done
+    # on a prior run.
+    total = sum(
+        1
+        for id_value in ids
+        for _, label in identities
+        for method in scan.methods
+        if (scan.name, label, method, id_value) not in skip
+    )
     done = 0
 
     try:
@@ -154,6 +165,8 @@ def _probes_for_scan(
             for user_obj, label in identities:
                 session = sessions[label]
                 for method in scan.methods:
+                    if (scan.name, label, method, id_value) in skip:
+                        continue
                     limiter.wait()
                     t0 = time.monotonic()
                     resp, err = _do_request(
@@ -205,6 +218,37 @@ def _probes_for_scan(
             s.close()
 
 
+def _load_resume(resume_path: Path) -> tuple[list[Probe], set[tuple[str, str, str, str]]]:
+    """Replay a JSONL resume log into (probes, done-coord-set).
+
+    Malformed lines are skipped — a truncated last record from SIGKILL
+    shouldn't poison the whole resume. Unknown fields are tolerated so
+    older logs stay readable after Probe gains new attributes.
+    """
+    if not resume_path.exists():
+        return [], set()
+    known = {f.name for f in Probe.__dataclass_fields__.values()}
+    probes: list[Probe] = []
+    done: set[tuple[str, str, str, str]] = set()
+    with resume_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            filtered = {k: v for k, v in data.items() if k in known}
+            try:
+                probe = Probe(**filtered)
+            except TypeError:
+                continue
+            probes.append(probe)
+            done.add((probe.scan, probe.user, probe.method, probe.id))
+    return probes, done
+
+
 def run_scans(
     config: Config,
     progress_cb=None,
@@ -212,20 +256,27 @@ def run_scans(
 ) -> list[Probe]:
     """Run all scans and return every probe collected.
 
-    If resume_path is given, probes are appended to it as JSONL as we go,
-    so a killed run can in principle be restarted (the skip-already-done
-    logic lives in a future iteration — for now it's a crash-safe log).
+    If resume_path is given, probes already in the log are replayed into
+    the return list and skipped on the wire — re-running a killed scan
+    picks up where it left off instead of starting over.
     """
     all_probes: list[Probe] = []
+    skip: set[tuple[str, str, str, str]] = set()
+
+    if resume_path is not None:
+        resume_path.parent.mkdir(parents=True, exist_ok=True)
+        prior, skip = _load_resume(resume_path)
+        all_probes.extend(prior)
 
     resume_fh = None
     if resume_path is not None:
-        resume_path.parent.mkdir(parents=True, exist_ok=True)
         resume_fh = resume_path.open("a", encoding="utf-8")
 
     try:
         for scan in config.scans:
-            for probe in _probes_for_scan(scan, config, progress_cb=progress_cb):
+            for probe in _probes_for_scan(
+                scan, config, progress_cb=progress_cb, skip=skip
+            ):
                 all_probes.append(probe)
                 if resume_fh is not None:
                     resume_fh.write(json.dumps(probe.to_dict()) + "\n")
@@ -273,7 +324,16 @@ def run_scans_with_harvest(
                 continue
             source_by_uuid = {u: src for u, src in harvested}
             shadow = _replace_ids(scan, tuple(u for u, _ in harvested))
-            for probe in _probes_for_scan(shadow, config, progress_cb=progress_cb):
+            # If resume was used, harvested probes already in first_pass
+            # must not be re-issued.
+            harvest_skip = {
+                (p.scan, p.user, p.method, p.id)
+                for p in first_pass
+                if p.scan == scan.name and p.id in source_by_uuid
+            }
+            for probe in _probes_for_scan(
+                shadow, config, progress_cb=progress_cb, skip=harvest_skip
+            ):
                 probe.discovered_via = source_by_uuid.get(probe.id)
                 extra_probes.append(probe)
                 if resume_fh is not None:

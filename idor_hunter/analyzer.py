@@ -116,6 +116,11 @@ def analyze(probes: list[Probe]) -> list[Finding]:
         (p.scan, p.id, p.user, p.method): p for p in probes
     }
 
+    # If the scan contains no authenticated identity, Check 1 (unauth_access)
+    # is meaningless — every 200 would fire. Skip it and emit one info-level
+    # notice so the user sees why. Reported from the TryHackMe Corridor run.
+    has_authed_identity = any(p.user != "__unauth__" for p in probes)
+
     for (scan_name, id_value, method), group in groups.items():
         by_user: dict[str, Probe] = {p.user: p for p in group}
         # The owner is heuristically the authed user who got a successful
@@ -141,7 +146,7 @@ def analyze(probes: list[Probe]) -> list[Finding]:
 
         # ---- Check 1: unauth access to what should be protected ----
         unauth = by_user.get("__unauth__")
-        if unauth and _is_substantive_success(unauth):
+        if has_authed_identity and unauth and _is_substantive_success(unauth):
             findings.append(
                 Finding(
                     severity="critical",
@@ -253,10 +258,85 @@ def analyze(probes: list[Probe]) -> list[Finding]:
                         )
                     )
 
+    if probes and not has_authed_identity:
+        findings.append(
+            Finding(
+                severity="info",
+                kind="no_auth_baseline",
+                title="Scan had no authenticated identity",
+                description=(
+                    "The scan ran only with the unauthenticated identity, so "
+                    "cross-user access checks were skipped. Every substantive "
+                    "200 would otherwise look like an IDOR. Add a baseline_user "
+                    "or test_users to enable the full detection suite."
+                ),
+                scan="(scan-wide)",
+                method="",
+                url="",
+                id="",
+                evidence={"probe_count": len(probes)},
+            )
+        )
+
+    findings.extend(_detect_session_expiry(probes))
+
     # Sort by severity then by scan/id for stable, reviewable output
     findings.sort(
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 99), f.scan, f.id, f.method)
     )
+    return findings
+
+
+def _detect_session_expiry(probes: list[Probe]) -> list[Finding]:
+    """Flag authed users whose denial rate matches the unauth baseline.
+
+    Time-windowed detection (last M probes all 401) false-positives on
+    legitimate scan patterns where the user has access to some IDs and not
+    others. Instead, compare per-user denial density against the unauth
+    baseline: if an authed user is denied at the same rate as somebody with
+    no session at all, the cookie probably expired.
+    """
+    findings: list[Finding] = []
+    by_user: dict[str, list[Probe]] = defaultdict(list)
+    for p in probes:
+        by_user[p.user].append(p)
+    unauth_probes = by_user.get("__unauth__", [])
+    if len(unauth_probes) < 10:
+        return findings
+    unauth_rate = sum(
+        1 for p in unauth_probes if p.status in _DENIAL_STATUSES
+    ) / len(unauth_probes)
+    for user, user_probes in by_user.items():
+        if user == "__unauth__" or len(user_probes) < 10:
+            continue
+        user_rate = sum(
+            1 for p in user_probes if p.status in _DENIAL_STATUSES
+        ) / len(user_probes)
+        if user_rate > 0.9 and abs(user_rate - unauth_rate) < 0.05:
+            findings.append(
+                Finding(
+                    severity="medium",
+                    kind="session_expired",
+                    title=f"User {user!r} session may be expired",
+                    description=(
+                        f"{user!r} was denied on {user_rate:.0%} of probes, "
+                        f"matching the unauthenticated baseline "
+                        f"({unauth_rate:.0%}). This usually means the session "
+                        f"cookie expired or was never valid. Cross-user "
+                        f"findings for this user are unreliable until "
+                        f"re-authenticated."
+                    ),
+                    scan="(scan-wide)",
+                    method="",
+                    url="",
+                    id="",
+                    evidence={
+                        "user_denial_rate": round(user_rate, 3),
+                        "unauth_denial_rate": round(unauth_rate, 3),
+                        "user_probe_count": len(user_probes),
+                    },
+                )
+            )
     return findings
 
 

@@ -2,7 +2,7 @@
 
 *A real-world run of my IDOR-hunting tool against a hash-guessing
 challenge. Got the flag, found a false-positive bug in my own tool,
-filed an issue, queued the fix for v0.3.*
+filed an issue, fixed in v0.3.*
 
 ## The room
 
@@ -73,7 +73,7 @@ But when the *entire app* is unauthenticated by design — common in
 CTF challenges and public APIs — every 200 trips the check. Real
 bug, not a tool limitation to paper over.
 
-## The fix (shipping in v0.3)
+## The fix (shipped in v0.3)
 
 Filed as issue #2:
 > Check 1 should only fire when the scan context includes at least

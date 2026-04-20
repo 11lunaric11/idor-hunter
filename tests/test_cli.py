@@ -74,6 +74,44 @@ def test_clean_run_writes_artifacts_exit_0(tmp_path):
     assert payload["findings"] == []
 
 
+def test_zero_probe_scan_exits_2(tmp_path, capsys):
+    """Empty probe set is a setup error, not a clean run.
+
+    Common causes: bad endpoint/config, target unreachable, numeric range
+    inverted. Previously exited 0 with empty reports — looked clean, was useless.
+    """
+    cfg = tmp_path / "scan.yaml"
+    cfg.write_text(
+        """\
+target:
+  base_url: "http://target.local"
+scans:
+  - name: "empty"
+    endpoint: "/api/x/{id}"
+    methods: [GET]
+    ids:
+      type: numeric
+      range: [5, 4]
+    include_unauth: true
+options:
+  rate_limit: 0
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    rc = main(["-c", str(cfg), "-o", str(out), "--quiet"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "zero probes" in err.lower() or "no probes" in err.lower()
+
+
+def count(self) -> int:
+    if self.kind == "numeric":
+        return max(0, self.end - self.start + 1)
+
+
 @responses.activate
 def test_critical_finding_exits_1(tmp_path):
     # Both users get identical substantive responses — IDOR fires
@@ -90,3 +128,38 @@ def test_critical_finding_exits_1(tmp_path):
     assert rc == 1
     payload = json.loads((out / "findings.json").read_text())
     assert any(f["severity"] in {"critical", "high"} for f in payload["findings"])
+
+
+def test_all_errored_probes_exits_2(tmp_path, capsys):
+    """Unreachable target → exit 2 with actionable stderr, not silent 0.
+
+    Distinct from zero-probe: probes were attempted and all failed with
+    network errors. Silent-failure mode v0.3 closes.
+    """
+    cfg = tmp_path / "dead.yaml"
+    cfg.write_text(
+        """\
+target:
+  base_url: "http://127.0.0.1:1"
+scans:
+  - name: "dead"
+    endpoint: "/api/x/{id}"
+    methods: [GET]
+    ids:
+      type: numeric
+      range: [1, 3]
+    include_unauth: true
+options:
+  timeout: 1
+  max_retries: 0
+  rate_limit: 0
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    rc = main(["-c", str(cfg), "-o", str(out), "--quiet"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "network" in err.lower() or "unreachable" in err.lower()

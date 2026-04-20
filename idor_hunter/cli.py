@@ -121,6 +121,30 @@ def main(argv: list[str] | None = None) -> int:
         resume_path=resume_path,
     )
 
+
+    # Fail-loud on silent-failure scans. Exit 2 distinguishes "setup broken"
+    # from "scan ran but found nothing" (0) and "scan found issues" (1).
+    if not probes:
+        print(
+            "error: scan produced zero probes. Check scan config (endpoint, "
+            "ID range).",
+            file=sys.stderr,
+        )
+        return 2
+
+    errored = sum(1 for p in probes if p.error)
+    if errored == len(probes):
+        example = next(p for p in probes if p.error)
+        print(
+            f"error: all {len(probes)} probes failed with network errors. "
+            f"Target unreachable? Check base_url, VPN, firewall.",
+            file=sys.stderr,
+        )
+        # Truncate the requests exception so the error message is readable
+        err_msg = (example.error or "").split("\n")[0][:200]
+        print(f"  first error: {err_msg}", file=sys.stderr)
+        return 2
+
     findings = analyze(probes)
     stats = summary_stats(probes, findings)
 

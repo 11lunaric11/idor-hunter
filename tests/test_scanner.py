@@ -4,6 +4,7 @@ Uses the `responses` library to mock HTTP calls so tests are deterministic.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import responses
@@ -200,6 +201,61 @@ def test_dedup_baseline_in_test_users(capsys):
     # And a warning should have been emitted
     err = capsys.readouterr().err
     assert "baseline_user" in err and "alice" in err
+
+
+@responses.activate
+def test_resume_skips_already_probed_coords(tmp_path):
+    """Probes already recorded in resume JSONL are replayed, not re-fetched.
+
+    Before v0.3, resume wrote the log but didn't skip on restart — every
+    rerun re-probed everything. This is the real resume behavior.
+    """
+    resume = tmp_path / "probes.jsonl"
+    # Pre-populate with a completed probe for id=1 as alice.
+    prior = {
+        "scan": "x",
+        "user": "alice",
+        "method": "GET",
+        "url": "http://target.local/api/x/1",
+        "id": "1",
+        "status": 200,
+        "length": 100,
+        "content_hash": "prior",
+        "location": "",
+        "elapsed_ms": 5,
+        "body_preview": "prior",
+        "error": None,
+        "discovered_via": None,
+    }
+    resume.write_text(json.dumps(prior) + "\n")
+
+    # Only register a response for id=2 — if the scanner tries to hit id=1
+    # again, `responses` will raise ConnectionError.
+    responses.add(
+        responses.GET, "http://target.local/api/x/2", json={}, status=200
+    )
+
+    scan = Scan(
+        name="x",
+        endpoint="/api/x/{id}",
+        methods=("GET",),
+        ids=IdSpec(kind="numeric", start=1, end=2),
+        baseline_user="alice",
+        test_users=(),
+        include_unauth=False,
+    )
+    cfg = _minimal_config((scan,))
+    probes = run_scans(cfg, resume_path=resume)
+
+    # Both probes in the returned list: loaded-from-log + newly-fetched.
+    assert len(probes) == 2
+    ids = {p.id for p in probes}
+    assert ids == {"1", "2"}
+    # Only one HTTP call actually happened (for id=2).
+    assert len(responses.calls) == 1
+    # The prior probe kept its hash.
+    prior_probe = next(p for p in probes if p.id == "1")
+    assert prior_probe.content_hash == "prior"
 
 
 @responses.activate
