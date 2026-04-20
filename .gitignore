@@ -33,3 +33,4 @@ htmlcov/
 # idor-hunter runtime output
 idor-results/
 *.jsonl
+.claude/

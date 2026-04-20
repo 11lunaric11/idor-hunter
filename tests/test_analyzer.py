@@ -146,3 +146,49 @@ def test_204_no_content_not_substantive():
     ]
     findings = analyze(probes)
     assert findings == []
+
+
+def test_redirect_match_flags_idor():
+    """Two users 302 to the same resource path — IDOR via redirect."""
+    probes = [
+        _probe(
+            user="alice",
+            status=302,
+            length=0,
+            content_hash="",
+            location="/invoice/1",
+        ),
+        _probe(
+            user="bob",
+            status=302,
+            length=0,
+            content_hash="",
+            location="/invoice/1",
+        ),
+    ]
+    findings = analyze(probes)
+    assert len(findings) == 1
+    assert findings[0].kind == "idor_read"
+    assert findings[0].evidence.get("match_via") == "redirect"
+
+
+def test_login_bounce_does_not_fire():
+    """Both users 302 → /login is a denial signal, not an IDOR."""
+    probes = [
+        _probe(
+            user="alice",
+            status=302,
+            length=0,
+            content_hash="",
+            location="/login?next=/invoice/1",
+        ),
+        _probe(
+            user="bob",
+            status=302,
+            length=0,
+            content_hash="",
+            location="/login?next=/invoice/1",
+        ),
+    ]
+    findings = analyze(probes)
+    assert findings == []

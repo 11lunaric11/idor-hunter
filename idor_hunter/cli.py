@@ -9,7 +9,7 @@ from . import __version__
 from .analyzer import analyze, summary_stats
 from .config import ConfigError, load_config
 from .reporter import write_findings_json, write_html_report, write_probes_csv
-from .scanner import run_scans
+from .scanner import run_scans, run_scans_with_harvest
 
 
 BANNER = r"""
@@ -60,6 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--quiet", action="store_true", help="suppress banner and progress"
     )
+    harvest = p.add_mutually_exclusive_group()
+    harvest.add_argument(
+        "--harvest",
+        dest="harvest",
+        action="store_true",
+        default=None,
+        help="enable UUID harvesting from response bodies (overrides config)",
+    )
+    harvest.add_argument(
+        "--no-harvest",
+        dest="harvest",
+        action="store_false",
+        default=None,
+        help="disable UUID harvesting (overrides config)",
+    )
     return p
 
 
@@ -96,7 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         print(file=sys.stderr)
 
     resume_path = out_dir / "probes.jsonl" if config.options.resume else None
-    probes = run_scans(
+    harvest_enabled = (
+        args.harvest if args.harvest is not None else config.options.harvest_ids
+    )
+    runner = run_scans_with_harvest if harvest_enabled else run_scans
+    probes = runner(
         config,
         progress_cb=None if args.quiet else _progress,
         resume_path=resume_path,
@@ -118,11 +137,15 @@ def main(argv: list[str] | None = None) -> int:
             probes_count=len(probes),
             path=out_dir / "report.html",
             config_name=Path(args.config).name,
+            probes=probes,
         )
 
     if not args.quiet:
         print(file=sys.stderr)
         print(f"  probes:    {stats['total_probes']}", file=sys.stderr)
+        harvested_count = sum(1 for p in probes if p.discovered_via)
+        if harvested_count:
+            print(f"  harvested: {harvested_count}", file=sys.stderr)
         print(f"  findings:  {stats['total_findings']}", file=sys.stderr)
         for sev in ("critical", "high", "medium", "low", "info"):
             count = stats["by_severity"].get(sev, 0)
@@ -131,10 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         print(file=sys.stderr)
         print(f"  wrote to: {out_dir}/", file=sys.stderr)
         if not args.no_html:
-            print(f"    → report.html", file=sys.stderr)
-        print(f"    → findings.json", file=sys.stderr)
+            print("    → report.html", file=sys.stderr)
+        print("    → findings.json", file=sys.stderr)
         if not args.no_csv:
-            print(f"    → probes.csv", file=sys.stderr)
+            print("    → probes.csv", file=sys.stderr)
 
     # Exit code: 0 clean, 1 if any high+ findings (useful for CI)
     if any(f.severity in {"critical", "high"} for f in findings):

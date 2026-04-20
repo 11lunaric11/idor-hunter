@@ -111,16 +111,23 @@ class Options:
     resume: bool = False
     verify_tls: bool = True
     max_retries: int = 2
+    harvest_ids: bool = False  # opt-in: second pass over UUIDs found in responses
+    harvest_max_ids: int = 50  # per-scan cap on harvested UUIDs
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "Options":
         data = data or {}
+        harvest_max_ids = int(data.get("harvest_max_ids", 50))
+        if harvest_max_ids < 0:
+            raise ConfigError("options.harvest_max_ids must be >= 0")
         return cls(
             rate_limit=float(data.get("rate_limit", 10.0)),
             timeout=float(data.get("timeout", 10.0)),
             resume=bool(data.get("resume", False)),
             verify_tls=bool(data.get("verify_tls", True)),
             max_retries=int(data.get("max_retries", 2)),
+            harvest_ids=bool(data.get("harvest_ids", False)),
+            harvest_max_ids=harvest_max_ids,
         )
 
 

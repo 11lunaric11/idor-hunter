@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import time
 
-import pytest
 import responses
 
 from idor_hunter.config import Config, IdSpec, Options, Scan, User
-from idor_hunter.scanner import RateLimiter, run_scans
+from idor_hunter.scanner import RateLimiter, run_scans, run_scans_with_harvest
 
 
 def _minimal_config(scans: tuple[Scan, ...]) -> Config:
@@ -177,3 +176,82 @@ def test_rate_limiter_disabled_is_fast():
     for _ in range(100):
         rl.wait()
     assert time.monotonic() - start < 0.1
+
+
+@responses.activate
+def test_dedup_baseline_in_test_users(capsys):
+    """baseline_user listed in test_users is deduplicated, not probed twice."""
+    responses.add(responses.GET, "http://target.local/api/x/1", json={}, status=200)
+
+    scan = Scan(
+        name="x",
+        endpoint="/api/x/{id}",
+        methods=("GET",),
+        ids=IdSpec(kind="numeric", start=1, end=1),
+        baseline_user="alice",
+        test_users=("alice",),  # redundant: same as baseline
+        include_unauth=False,
+    )
+    cfg = _minimal_config((scan,))
+    probes = run_scans(cfg)
+
+    # Only one probe (alice), not two
+    assert len(probes) == 1
+    # And a warning should have been emitted
+    err = capsys.readouterr().err
+    assert "baseline_user" in err and "alice" in err
+
+
+@responses.activate
+def test_harvest_replays_uuids_from_response_bodies():
+    """First-pass body leaks a UUID; harvest pass probes it."""
+    seed = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    leaked = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    # First pass: seed returns a body containing `leaked`
+    responses.add(
+        responses.GET,
+        f"http://target.local/api/res/{seed}",
+        json={"id": seed, "related": leaked, "payload": "x" * 100},
+        status=200,
+    )
+    # Second pass probes `leaked`
+    responses.add(
+        responses.GET,
+        f"http://target.local/api/res/{leaked}",
+        json={"id": leaked, "payload": "y" * 100},
+        status=200,
+    )
+
+    scan = Scan(
+        name="res",
+        endpoint="/api/res/{id}",
+        methods=("GET",),
+        ids=IdSpec(kind="list", values=(seed,)),
+        baseline_user="alice",
+        test_users=(),
+        include_unauth=False,
+    )
+    cfg = Config(
+        base_url="http://target.local",
+        users={"alice": User(name="alice", cookies={"session": "alice"})},
+        scans=(scan,),
+        options=Options(
+            rate_limit=0,
+            timeout=5,
+            max_retries=0,
+            harvest_ids=True,
+            harvest_max_ids=50,
+        ),
+    )
+
+    probes = run_scans_with_harvest(cfg)
+
+    ids = [p.id for p in probes]
+    assert seed in ids
+    assert leaked in ids
+
+    harvested = [p for p in probes if p.discovered_via]
+    assert len(harvested) == 1
+    assert harvested[0].id == leaked
+    assert seed in harvested[0].discovered_via

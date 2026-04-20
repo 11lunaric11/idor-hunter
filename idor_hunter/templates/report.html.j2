@@ -108,6 +108,16 @@
   }
   .status-chip .code { color: var(--accent); font-weight: 600; }
   .status-chip .count { color: var(--muted); margin-left: 6px; }
+  .status-chip.ok       .code { color: var(--accent); }
+  .status-chip.redirect .code { color: var(--low); }
+  .status-chip.denied   .code { color: var(--medium); }
+  .status-chip.error    .code { color: var(--critical); }
+
+  .kind {
+    font-size: 10px; font-weight: 500; letter-spacing: 0.5px;
+    color: var(--muted); font-family: ui-monospace, Menlo, monospace;
+    padding: 4px 6px; flex-shrink: 0;
+  }
 
   .empty {
     text-align: center; padding: 40px; color: var(--muted);
@@ -162,11 +172,38 @@
 <h2>HTTP status distribution</h2>
 <div class="status-grid">
   {% for code, count in stats.by_status.items() %}
-  <div class="status-chip">
+  {% if code == 0 or code >= 500 %}
+    {% set chip_class = "error" %}
+  {% elif code < 300 %}
+    {% set chip_class = "ok" %}
+  {% elif code < 400 %}
+    {% set chip_class = "redirect" %}
+  {% else %}
+    {% set chip_class = "denied" %}
+  {% endif %}
+  <div class="status-chip {{ chip_class }}">
     <span class="code">{{ code }}</span><span class="count">× {{ count }}</span>
   </div>
   {% endfor %}
 </div>
+
+{% if harvested %}
+<h2>Harvested IDs</h2>
+<p style="color: var(--muted); margin-top: -4px; margin-bottom: 12px;">
+  {{ harvested|length }} UUID{{ "s" if harvested|length != 1 else "" }} extracted
+  from response bodies and replayed in a second pass.
+</p>
+<div class="evidence" style="white-space: normal;">
+  {% for id, source in harvested %}
+  <div style="display: flex; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--border);">
+    <span style="color: var(--accent); flex-shrink: 0;">{{ id|e }}</span>
+    <span style="color: var(--muted); overflow: hidden; text-overflow: ellipsis;">
+      ← {{ source|e }}
+    </span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 <h2>Findings</h2>
 {% if findings %}
@@ -174,6 +211,7 @@
   <div class="finding">
     <div class="finding-head" onclick="this.parentElement.classList.toggle('open')">
       <span class="sev {{ f.severity }}">{{ f.severity }}</span>
+      <span class="kind">{{ f.kind|e }}</span>
       <span class="finding-title">{{ f.title|e }}</span>
       <span class="finding-meta">{{ f.method|e }} · id={{ f.id|e }}</span>
     </div>

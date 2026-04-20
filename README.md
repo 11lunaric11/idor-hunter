@@ -114,6 +114,10 @@ If the app uses incrementing integer IDs, a range sweep finds everything. If the
 - **Idempotent write verbs** — `PUT` and `DELETE` *actually modify things*. Only enable them on test data you don't care about, or on a staging clone. The tool won't stop you from DELETE-ing production records; that's on you.
 - **Length-drift heuristic** (10% tolerance) occasionally flags legitimately-different-but-similar responses as matches. Review findings, don't rubber-stamp them. The report surfaces the exact hashes and lengths so you can check.
 - **No JS rendering.** This tool hits HTTP endpoints directly. For SPA-heavy apps you still need to reverse-engineer the API from the network tab first.
+- **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower `_SUBSTANTIVE_LENGTH` in `analyzer.py`.
+- **Destructive verbs = inferred impact.** For `DELETE`/`PUT`, identical cross-user responses indicate a missing authz check but don't *confirm* the resource was mutated. Verify impact manually before reporting.
+- **No session refresh.** If the target session expires mid-scan, subsequent probes become 401s and findings will be wrong. Keep scans short or re-run with fresh cookies.
+- **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes). Harvesting only runs against scans with `ids.type: list`.
 
 ---
 

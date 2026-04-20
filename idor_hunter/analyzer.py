@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from urllib.parse import urlsplit
 
 from .scanner import Probe
 
@@ -21,6 +22,10 @@ _SUCCESS_STATUSES = {200, 201, 202, 204}
 
 # HTTP status codes that typically indicate "access was properly denied"
 _DENIAL_STATUSES = {401, 403, 404}
+
+# Redirect destinations that indicate denial (login bounces, logouts).
+# A 302 to one of these is a denial signal, not an IDOR.
+_DENIAL_REDIRECT_PATHS = ("/login", "/signin", "/auth", "/logout")
 
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -68,6 +73,35 @@ def _content_matches(a: Probe, b: Probe) -> bool:
     return ratio > 0.9 and abs(a.length - b.length) < 200
 
 
+def _is_denial_redirect(location: str) -> bool:
+    """True if the redirect target looks like a login bounce / logout."""
+    if not location:
+        return False
+    path = urlsplit(location).path.lower()
+    return any(path == p or path.startswith(p + "/") for p in _DENIAL_REDIRECT_PATHS)
+
+
+def _redirect_matches(a: Probe, b: Probe) -> bool:
+    """Two 3xx responses that redirect to the same non-denial target.
+
+    Catches IDORs where denied users get /login and allowed users get the
+    resource-specific page — the body never contains the data, but the
+    location header reveals it.
+    """
+    if not (300 <= a.status < 400 and 300 <= b.status < 400):
+        return False
+    if not a.location or not b.location:
+        return False
+    # Strip querystring; keep path + fragment.
+    def _norm(url: str) -> str:
+        s = urlsplit(url)
+        return s.path + (f"#{s.fragment}" if s.fragment else "")
+    if _norm(a.location) != _norm(b.location):
+        return False
+    # Login bounces are denial signals, not IDORs.
+    return not _is_denial_redirect(a.location)
+
+
 def analyze(probes: list[Probe]) -> list[Finding]:
     """Cross-reference probes and produce findings."""
     findings: list[Finding] = []
@@ -76,18 +110,34 @@ def analyze(probes: list[Probe]) -> list[Finding]:
     for p in probes:
         groups[_group_key(p)].append(p)
 
+    # Flat index for same-user cross-method lookups (Check 3). O(1) lookup
+    # avoids O(probes) inner scans inside the group loop.
+    by_coord: dict[tuple[str, str, str, str], Probe] = {
+        (p.scan, p.id, p.user, p.method): p for p in probes
+    }
+
     for (scan_name, id_value, method), group in groups.items():
         by_user: dict[str, Probe] = {p.user: p for p in group}
-        baseline = next(
-            (p for u, p in by_user.items() if u not in {"__unauth__"}),
-            None,
-        )
-        # Identify an explicit baseline if multiple authed users exist:
-        # the owner is heuristically the one who gets a successful response.
+        # The owner is heuristically the authed user who got a successful
+        # response. If multiple authed users succeed we pick the first —
+        # explicit baseline_user assignment happens at config level.
         owner = next(
             (p for p in group if p.user != "__unauth__" and _is_substantive_success(p)),
             None,
         )
+        # An owner is also needed for redirect-match (where body may be empty).
+        if owner is None:
+            owner = next(
+                (
+                    p
+                    for p in group
+                    if p.user != "__unauth__"
+                    and 300 <= p.status < 400
+                    and p.location
+                    and not _is_denial_redirect(p.location)
+                ),
+                None,
+            )
 
         # ---- Check 1: unauth access to what should be protected ----
         unauth = by_user.get("__unauth__")
@@ -116,45 +166,53 @@ def analyze(probes: list[Probe]) -> list[Finding]:
                 )
             )
 
-        # ---- Check 2: cross-user IDOR (content match) ----
+        # ---- Check 2: cross-user IDOR (content or redirect match) ----
         if owner is not None:
             for user, probe in by_user.items():
                 if user in {"__unauth__", owner.user}:
                     continue
-                if not _is_substantive_success(probe):
+                content_hit = (
+                    _is_substantive_success(probe) and _content_matches(owner, probe)
+                )
+                redirect_hit = _redirect_matches(owner, probe)
+                if not (content_hit or redirect_hit):
                     continue
-                if _content_matches(owner, probe):
-                    severity = "high" if method == "GET" else "critical"
-                    kind = "idor_read" if method == "GET" else "idor_write"
-                    findings.append(
-                        Finding(
-                            severity=severity,
-                            kind=kind,
-                            title=(
-                                f"IDOR: user {user!r} can {method} resource "
-                                f"owned by {owner.user!r}"
-                            ),
-                            description=(
-                                f"Both users received functionally identical "
-                                f"responses (hash match or <10% length drift). "
-                                f"This indicates {user!r} has unauthorized "
-                                f"{method} access to a resource that appears to "
-                                f"belong to {owner.user!r}."
-                            ),
-                            scan=scan_name,
-                            method=method,
-                            url=probe.url,
-                            id=id_value,
-                            evidence={
-                                "owner_status": owner.status,
-                                "owner_length": owner.length,
-                                "owner_hash": owner.content_hash,
-                                "attacker_status": probe.status,
-                                "attacker_length": probe.length,
-                                "attacker_hash": probe.content_hash,
-                            },
-                        )
+                severity = "high" if method == "GET" else "critical"
+                kind = "idor_read" if method == "GET" else "idor_write"
+                evidence = {
+                    "owner_status": owner.status,
+                    "owner_length": owner.length,
+                    "owner_hash": owner.content_hash,
+                    "attacker_status": probe.status,
+                    "attacker_length": probe.length,
+                    "attacker_hash": probe.content_hash,
+                }
+                if redirect_hit:
+                    evidence["owner_location"] = owner.location
+                    evidence["attacker_location"] = probe.location
+                    evidence["match_via"] = "redirect"
+                findings.append(
+                    Finding(
+                        severity=severity,
+                        kind=kind,
+                        title=(
+                            f"IDOR: user {user!r} can {method} resource "
+                            f"owned by {owner.user!r}"
+                        ),
+                        description=(
+                            f"Both users received functionally identical "
+                            f"responses (hash match, <10% length drift, or "
+                            f"matching redirect target). This indicates "
+                            f"{user!r} has unauthorized {method} access to a "
+                            f"resource that appears to belong to {owner.user!r}."
+                        ),
+                        scan=scan_name,
+                        method=method,
+                        url=probe.url,
+                        id=id_value,
+                        evidence=evidence,
                     )
+                )
 
         # ---- Check 3: write-verb success where read was denied ----
         # If DELETE/PUT succeeded but GET returned 403 for the same user+id,
@@ -165,18 +223,8 @@ def analyze(probes: list[Probe]) -> list[Finding]:
                     continue
                 if probe.status not in _SUCCESS_STATUSES:
                     continue
-                # Look at GET for same user+id
-                get_probe = next(
-                    (
-                        p
-                        for p in probes
-                        if p.scan == scan_name
-                        and p.id == id_value
-                        and p.user == user
-                        and p.method == "GET"
-                    ),
-                    None,
-                )
+                # Look at GET for same user+id via pre-built index (O(1)).
+                get_probe = by_coord.get((scan_name, id_value, user, "GET"))
                 if get_probe and get_probe.status in _DENIAL_STATUSES:
                     findings.append(
                         Finding(
