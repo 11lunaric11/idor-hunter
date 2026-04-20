@@ -277,6 +277,7 @@ Harvested IDs (from `--harvest`) surface as regular findings above, with the ori
 
 - [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as [#2](https://github.com/11lunaric11/idor-hunter/issues/2), and fixed in v0.3.0.
 - [**User ID controlled by request parameter (PortSwigger)**](WRITEUP-portswigger-user-id.md) — second real target. Tool flagged the vulnerability correctly via `unauth_access` — a different check than I expected. Lab is misdesigned: advertises IDOR, actually has no auth at all.
+- [**Method-based access control (PortSwigger)**](WRITEUP-portswigger-method-bypass.md) — third real target. Analyzer did not fire by design; raw probe data exposed the bypass plus a second unintended path (PATCH). Motivated a new analyzer check queued for v0.5.
 
 ---
 
