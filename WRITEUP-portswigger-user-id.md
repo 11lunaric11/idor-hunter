@@ -122,7 +122,5 @@ them as.
   room title implies "access control enforced but broken" when actually
   there's no access control at all. Minor; not filing.
 
-## Scan output
-
 - [findings.json](lab-test/findings.json) (redacted session)
 - [probes.csv](lab-test/probes.csv) (redacted session)
