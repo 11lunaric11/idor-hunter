@@ -10,7 +10,7 @@
 
 It is **not** a fuzzer. It is a focused tool for the one thing that catches ~80% of real-world horizontal privilege-escalation bugs: *"does user B get a meaningful response for an ID that only belongs to user A?"*
 
-**Battle-tested:** see [the Corridor writeup](WRITEUP-corridor.md) for a real-world run, including a false-positive I discovered by dogfooding and queued for the next release.
+**Battle-tested:** see [the Corridor writeup](WRITEUP-corridor.md) for a real-world run, including a false-positive I discovered by dogfooding (filed as [#2](https://github.com/11lunaric11/idor-hunter/issues/2), fixed in v0.3).
 
 ## Sample output
 
@@ -92,19 +92,29 @@ The CLI writes three artifacts:
 | `findings.json` | Machine-readable findings for piping into other tools |
 | `probes.csv` | Every single request/response — grep it, pivot it, keep it for evidence |
 
-Exit code is `1` if any `critical` or `high` finding was raised, so you can wire this into CI against a staging environment.
+### Exit codes
+
+The tool follows a strict exit-code contract so you can wire it into CI:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Scan ran clean — no `critical` or `high` findings |
+| `1` | Scan produced at least one `critical` or `high` finding |
+| `2` | Setup error — bad config, zero probes, or all probes errored (target unreachable) |
+
+Exit `2` distinguishes "the scan didn't really run" from "the scan ran and found nothing." Critical for CI: a VPN drop or cookie expiry won't silently pass as a clean run.
 
 ### CLI flags
 
 ```
-idor-hunter -c CONFIG [-o OUT_DIR] [--harvest] [--no-html] [--no-csv] [--quiet]
+idor-hunter -c CONFIG [-o OUT_DIR] [--harvest|--no-harvest] [--no-html] [--no-csv] [--quiet]
 ```
 
 | Flag | Effect |
 |------|--------|
 | `-c, --config` | Path to YAML scan config (required) |
 | `-o, --out-dir` | Output directory (default: `./idor-results`) |
-| `--harvest` | After first pass, extract UUIDs from response bodies and replay them as a second pass. Catches IDORs against resources you didn't know existed. |
+| `--harvest` / `--no-harvest` | After first pass, extract UUIDs from response bodies and replay them as a second pass. Overrides config's `harvest_ids` setting. |
 | `--no-html` / `--no-csv` | Skip HTML report or CSV probe dump |
 | `--quiet` | Suppress banner and progress bar |
 
@@ -130,13 +140,19 @@ A scanner that looks at responses in isolation can only ever flag obvious stuff 
 For each `(endpoint, id)` pair, the scanner fires the request as the baseline user (who should own the resource) and as each test user. If a test user gets back a response that matches the baseline's — identical SHA-1, or length within 10% to tolerate CSRF tokens and timestamps — that's an IDOR. Severity is `high` for `GET`, `critical` for write verbs.
 
 **Check 2 — Unauthenticated access.**
-Every scan also fires an unauthenticated request by default. If the unauthenticated request returns 200 with a substantive body (≥50 bytes, not `204 No Content`), the endpoint is leaking data to the world. This catches the "we forgot to add the auth middleware to this route" class of bug.
+When the scan contains at least one authenticated identity, an unauthenticated request that returns a substantive 200 response signals the auth middleware is missing. This catches "we forgot to add `@requires_auth` to this route."
+
+If the scan has *no* authenticated identity (e.g. CTF hash-guessing rooms, or targets where you just want a structured sweep), Check 2 is silently skipped and a single `no_auth_baseline` info-level notice is emitted. Firing `unauth_access` on every 200 in that context is a false-positive flood — discovered during the [Corridor run](WRITEUP-corridor.md) and fixed in v0.3.
 
 **Check 3 — Write-without-read.**
 For write verbs (`PUT`, `PATCH`, `DELETE`, `POST`), the analyzer cross-references the same user's `GET` for the same ID. If `GET` returned 403 but `PUT` succeeded, the write path skipped the ownership check — a critical privilege-escalation seam. This is a surprisingly common pattern in frameworks where `@requires_ownership` is only applied to read views.
 
 **Check 4 — Redirect matching.**
 Some apps don't return data bodies for denied requests — they 302 to `/login`, `/forbidden`, or similar. If the baseline user's 302 target matches the test user's 302 target (same `Location` header), both are being routed to the same destination regardless of ownership, which often indicates the same underlying resource was accessed. Works as a companion to Check 1: content match *or* redirect match flags the finding.
+
+### Session-expiry detection (v0.3+)
+
+Separate from the checks above, the analyzer runs a post-scan heuristic per authenticated user: if an authed user's denial rate matches the unauthenticated baseline (both 90%+, less than 5% delta, ≥10 probes, zero successful authenticated responses), their session cookie probably died mid-scan. Emitted as a `session_expired` medium-severity finding so the subsequent zero-finding output doesn't silently masquerade as clean.
 
 ### Why two users, not one
 
@@ -149,17 +165,21 @@ If the app uses incrementing integer IDs, a range sweep finds everything. If the
 - Harvest them from other sources (URLs shared in emails, IDs returned by *other* API calls, references in the JS bundle) and drop them into `ids.type: list`
 - Run with `--harvest`, which scans first-pass responses for UUIDs and automatically replays every discovered one against all test users. This catches IDORs against resources your config didn't know existed.
 
+### Resume (v0.3+)
+
+Long scans crash. Networks flake. Ctrl+C happens. With `options.resume: true`, every probe is appended to `probes.jsonl` as it lands, and on rerun the tool reads the log and skips any `(scan, user, method, id)` tuple already completed. The progress bar reflects the remaining work, not the total. Rerunning a finished scan is a no-op.
+
 ### What it deliberately doesn't do
 
 - **No brute-force** — it's a diffing tool, not a fuzzer. Use `ffuf` / `wfuzz` for wordlist-based content discovery.
 - **No exploitation** — findings describe the anomaly, they don't dump victim data or modify records (beyond the probe requests themselves).
 - **No auth flow automation** — you paste in session cookies or bearer tokens. Handling every custom login flow is a rabbit hole; capturing a session in Burp and dropping it in YAML takes 30 seconds.
 - **No CAPTCHA bypass**, no proxy rotation, none of that. Tool stays in its lane.
-- **No authentication-bypass header probes** (`X-Forwarded-For`, `X-Original-URL`, etc.). That's a different vulnerability class with different semantics; mixing it into an IDOR tool would dilute the signal. If that's what you need, use a dedicated authz-bypass tool alongside this one.
+- **No authentication-bypass header probes** (`X-Forwarded-For`, `X-Original-URL`, etc.). That's a different vulnerability class with different semantics; mixing it into an IDOR tool would dilute the signal. Use a dedicated authz-bypass tool alongside this one.
 
 ### Known gaps
 
-These are bugs and missing features, as opposed to the scope decisions above. Each one is a candidate for a future release; issues track individual fixes.
+These are bugs and missing features, as opposed to the scope decisions above. Each one is a candidate for a future release.
 
 - **Rate-limited APIs** may return 429s that look like denials. Tune `options.rate_limit` down.
 - **Idempotent write verbs** — `PUT` and `DELETE` *actually modify things*. Only enable them on test data you don't care about, or on a staging clone. The tool won't stop you from DELETE-ing production records; that's on you.
@@ -167,8 +187,9 @@ These are bugs and missing features, as opposed to the scope decisions above. Ea
 - **No JS rendering.** This tool hits HTTP endpoints directly. For SPA-heavy apps you still need to reverse-engineer the API from the network tab first.
 - **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower the `_SUBSTANTIVE_LENGTH` constant in `idor_hunter/analyzer.py`.
 - **Destructive verbs = inferred impact.** For `DELETE`/`PUT`, identical cross-user responses indicate a missing authz check but don't *confirm* the resource was mutated. Verify impact manually before reporting.
-- **No session refresh.** If the target session expires mid-scan, subsequent probes become 401s. Since v0.3 the analyzer detects this by comparing per-user denial density against the unauth baseline and emits a `session_expired` finding — but it can't refresh the cookie for you. Re-run with fresh auth.
+- **No auto session refresh.** The analyzer detects expired sessions (see above) and emits `session_expired`, but it can't re-issue the cookie for you. Re-run with fresh auth.
 - **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes match the pattern).
+- **No nested path placeholders yet.** `/api/user/{user_id}/invoice/{id}` (multiple IDs per endpoint) isn't supported; the tool currently iterates a single `{id}` per scan. On the roadmap for a future release.
 
 ---
 
@@ -206,7 +227,7 @@ scans:                                # REQUIRED, at least one
 options:
   rate_limit: 10        # req/sec (0 = unlimited, default 10)
   timeout: 10           # seconds
-  resume: false         # write probes.jsonl as we go, crash-safe
+  resume: false         # crash-safe resume: append probes.jsonl, skip done on rerun
   verify_tls: true      # set false for self-signed certs in labs
   max_retries: 2        # per-request retry on network errors
   harvest_ids: false    # enable UUID harvesting (also via --harvest CLI flag)
@@ -241,10 +262,12 @@ options:
 
 | Kind | Severity | Meaning |
 |------|----------|---------|
-| `unauth_access` | critical | Endpoint serves data to unauthenticated clients |
+| `unauth_access` | critical | Endpoint serves data to unauthenticated clients (scan had an authed baseline for comparison) |
 | `idor_write` | critical | Non-owner can `PUT`/`DELETE`/`PATCH`/`POST` owner's resource |
 | `write_without_read` | critical | Write succeeds for a user whose read returns 403 |
 | `idor_read` | high | Non-owner can `GET` owner's resource (content or redirect match) |
+| `session_expired` | medium | Authed user's denial rate matches the unauth baseline mid-scan — cookie probably died |
+| `no_auth_baseline` | info | Scan had no authenticated identity, so Check 2 was skipped |
 
 Harvested IDs (from `--harvest`) surface as regular findings above, with the originating probe tracked in the `discovered_via` field of the underlying probe record.
 
@@ -252,7 +275,7 @@ Harvested IDs (from `--harvest`) surface as regular findings above, with the ori
 
 ## Real-world use
 
-- [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as an issue, fixed in v0.3.
+- [**Corridor (TryHackMe)**](WRITEUP-corridor.md) — walkthrough of using idor-hunter to solve a hash-guessing challenge. Includes a false-positive bug I discovered in my own tool, filed as [#2](https://github.com/11lunaric11/idor-hunter/issues/2), and fixed in v0.3.0.
 
 ---
 
@@ -262,7 +285,7 @@ Harvested IDs (from `--harvest`) surface as regular findings above, with the ori
 # Install with dev deps
 pip install -e ".[dev]"
 
-# Run tests
+# Run tests (40 cases, across Python 3.10 / 3.11 / 3.12 in CI)
 pytest
 
 # Lint
