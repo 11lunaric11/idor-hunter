@@ -165,6 +165,30 @@ If the app uses incrementing integer IDs, a range sweep finds everything. If the
 - Harvest them from other sources (URLs shared in emails, IDs returned by *other* API calls, references in the JS bundle) and drop them into `ids.type: list`
 - Run with `--harvest`, which scans first-pass responses for UUIDs and automatically replays every discovered one against all test users. This catches IDORs against resources your config didn't know existed.
 
+### Multi-placeholder endpoints (v0.4+)
+
+Real APIs rarely have a single ID per endpoint. `/api/org/{org_id}/invoice/{id}` is the norm. The scanner iterates the Cartesian product of named placeholder specs:
+
+```yaml
+scans:
+  - name: "invoice per org"
+    endpoint: "/api/org/{org_id}/invoice/{id}"
+    methods: [GET]
+    ids:
+      org_id:
+        type: list
+        values: ["acme", "globex"]
+      id:
+        type: numeric
+        range: [1, 50]
+    baseline_user: alice
+    test_users: [bob]
+```
+
+The above produces `2 orgs × 50 IDs × 2 users = 200` probes per method. Probe IDs in `probes.csv` and findings are recorded in declaration order as `org_id=acme,id=1` etc.
+
+Endpoint placeholders and declared specs must match exactly — `{id}` in the template with no `id:` spec (or vice versa) is a config error at load time, not a silent unsubstituted URL at probe time.
+
 ### Resume (v0.3+)
 
 Long scans crash. Networks flake. Ctrl+C happens. With `options.resume: true`, every probe is appended to `probes.jsonl` as it lands, and on rerun the tool reads the log and skips any `(scan, user, method, id)` tuple already completed. The progress bar reflects the remaining work, not the total. Rerunning a finished scan is a no-op.
@@ -188,8 +212,9 @@ These are bugs and missing features, as opposed to the scope decisions above. Ea
 - **Small-response blind spot.** Responses under ~50 bytes are treated as errors/empty and won't trigger findings. If you're testing an API with minimal JSON payloads, lower the `_SUBSTANTIVE_LENGTH` constant in `idor_hunter/analyzer.py`.
 - **Destructive verbs = inferred impact.** For `DELETE`/`PUT`, identical cross-user responses indicate a missing authz check but don't *confirm* the resource was mutated. Verify impact manually before reporting.
 - **No auto session refresh.** The analyzer detects expired sessions (see above) and emits `session_expired`, but it can't re-issue the cookie for you. Re-run with fresh auth.
-- **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes match the pattern).
-- **No nested path placeholders yet.** `/api/user/{user_id}/invoice/{id}` (multiple IDs per endpoint) isn't supported; the tool currently iterates a single `{id}` per scan. On the roadmap for a future release.
+- **Harvesting is UUID-only.** `--harvest` replays UUIDs found in response bodies but does not harvest numeric IDs (regex-based numeric extraction produces too much noise — amounts, timestamps, zip codes match the pattern). Harvester also skips multi-placeholder scans — it emits a stderr warning and moves on. Multi-placeholder harvest support is on the roadmap.
+- **URL encoding.** Placeholder values containing `/`, `@`, `%`, `?`, `&`, `#`, `;`, `=`, `+`, or whitespace are substituted via plain string replace and may produce malformed URLs. Numeric and UUID IDs are unaffected. Tracked in [#4](https://github.com/11lunaric11/idor-hunter/issues/4); landing in v0.5 alongside HAR import.
+- **No HAR/Burp import yet.** Configs are hand-written from session captures. v0.5 will add `idor-hunter import session.har > scan.yaml` to remove the YAML-from-scratch onboarding friction.
 
 ---
 
@@ -212,12 +237,25 @@ auth:
 
 scans:                                # REQUIRED, at least one
   - name: "invoice enumeration"       # REQUIRED, shows up in the report
-    endpoint: "/api/invoice/{id}"     # REQUIRED, must contain {id}
+    endpoint: "/api/invoice/{id}"     # REQUIRED, placeholders must match ids below
     methods: [GET, PUT, DELETE]       # default: [GET]
-    ids:                              # REQUIRED
+
+    # Single-placeholder form (v0.3+). Template uses {id}.
+    ids:
       type: numeric                   # or "list"
       range: [1, 500]                 # for numeric
       # values: ["uuid-a", "uuid-b"]  # for list
+
+    # Multi-placeholder form (v0.4+). Each placeholder gets its own spec.
+    # Template endpoint must use matching names, e.g. "/api/org/{org_id}/invoice/{id}".
+    # ids:
+    #   org_id:
+    #     type: list
+    #     values: ["acme", "globex"]
+    #   id:
+    #     type: numeric
+    #     range: [1, 500]
+
     baseline_user: alice              # the "owner" — optional if only testing unauth
     test_users: [bob, carol]          # users who should NOT have access
     include_unauth: true              # also fire with no auth (default: true)
@@ -287,7 +325,7 @@ Harvested IDs (from `--harvest`) surface as regular findings above, with the ori
 # Install with dev deps
 pip install -e ".[dev]"
 
-# Run tests (40 cases, across Python 3.10 / 3.11 / 3.12 in CI)
+# Run tests (56 cases, across Python 3.10 / 3.11 / 3.12 in CI)
 pytest
 
 # Lint
@@ -302,6 +340,7 @@ The project is laid out so the pieces are swappable:
 - `analyzer.py` only consumes `Probe` records — produces `Finding` records
 - `reporter.py` only consumes `Finding` records — produces files
 - `harvester.py` extracts replay candidates from probe responses
+- `config.py` parses YAML into typed dataclasses, including the `PlaceholderMap` that drives multi-placeholder iteration
 
 Want to add a check? Add a function in `analyzer.py`. Want to add an output format? Add a writer in `reporter.py`. The data contract between layers is stable.
 
