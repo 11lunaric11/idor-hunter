@@ -5,11 +5,25 @@ so the rest of the code doesn't juggle raw dicts.
 """
 from __future__ import annotations
 
+import itertools
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Placeholder name grammar: Python-identifier-ish. Keeps us out of the
+# quoting/encoding mess that comes with arbitrary path segments.
+_VALID_PLACEHOLDER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PLACEHOLDER_RE = re.compile(r"\{([^}]*)\}")
+
+# Keys that, at the top level of the `ids` block, signal the v0.3 single-
+# placeholder shape (e.g. `ids: {type: numeric, range: [1, 10]}`). In the
+# v0.4 named-placeholder shape, keys are placeholder names instead. If
+# someone tries to use one of these as a placeholder name, detection
+# misfires and we raise a rename hint.
+_OLD_SHAPE_KEYS = frozenset({"type", "range", "values"})
 
 
 class ConfigError(ValueError):
@@ -71,15 +85,88 @@ class IdSpec:
 
 
 @dataclass(frozen=True)
+class PlaceholderMap:
+    """Maps placeholder names (e.g. 'org_id', 'id') to their IdSpec.
+
+    A v0.3 single-placeholder config maps to PlaceholderMap({"id": <spec>}).
+    v0.4 multi-placeholder configs populate arbitrary names. Scan uses this
+    to Cartesian-iterate over every combination of placeholder values.
+    """
+
+    specs: dict[str, IdSpec]
+
+    def iter_combinations(self):
+        """Yield every {name: value} dict over the Cartesian product of specs."""
+        names = list(self.specs.keys())
+        iterables = [list(spec.iter_ids()) for spec in self.specs.values()]
+        for combo in itertools.product(*iterables):
+            yield dict(zip(names, combo))
+
+    def count(self) -> int:
+        total = 1
+        for spec in self.specs.values():
+            total *= spec.count()
+        return total
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PlaceholderMap":
+        if not isinstance(data, dict):
+            raise ConfigError(
+                f"'ids' block must be a mapping, got {type(data).__name__}"
+            )
+        if not data:
+            raise ConfigError("'ids' block is empty")
+        # v0.3 single-placeholder shape: `type`/`range`/`values` at top level.
+        if any(k in data for k in _OLD_SHAPE_KEYS):
+            # Disambiguate: if a user tried to name a v0.4 placeholder `type`
+            # (or range/values), detection misfires — the inner value would
+            # be a dict with its own `type` key. Give them an actionable hint.
+            for k in _OLD_SHAPE_KEYS:
+                if k in data and isinstance(data[k], dict) and "type" in data[k]:
+                    raise ConfigError(
+                        f"placeholder name {k!r} collides with v0.3 schema keyword; "
+                        f"rename it (e.g. {k}_val) — 'type', 'range', and 'values' "
+                        f"are reserved at the top level of the ids block"
+                    )
+            return cls(specs={"id": IdSpec.from_dict(data)})
+        # v0.4 named-placeholder shape: each key is a placeholder name.
+        specs: dict[str, IdSpec] = {}
+        for name, spec_data in data.items():
+            if not _VALID_PLACEHOLDER_NAME.match(str(name)):
+                raise ConfigError(
+                    f"invalid placeholder name {name!r}: must match "
+                    f"[A-Za-z_][A-Za-z0-9_]*"
+                )
+            if not isinstance(spec_data, dict):
+                raise ConfigError(
+                    f"placeholder {name!r}: expected a mapping, "
+                    f"got {type(spec_data).__name__}"
+                )
+            specs[name] = IdSpec.from_dict(spec_data)
+        return cls(specs=specs)
+
+
+@dataclass(frozen=True)
 class Scan:
     name: str
-    endpoint: str  # must contain {id}
+    endpoint: str  # must contain at least one `{name}` placeholder
     methods: tuple[str, ...]
-    ids: IdSpec
+    ids: IdSpec  # legacy single-placeholder view; scanner.py reads this
     baseline_user: str | None
     test_users: tuple[str, ...]
     body: dict[str, Any] | None = None
     include_unauth: bool = True
+    # Full placeholder map (v0.4+). Defaults to None so direct construction
+    # (e.g. in tests, scanner._replace_ids) keeps working; __post_init__
+    # synthesizes a single-placeholder map from `ids` when not provided.
+    placeholders: "PlaceholderMap | None" = None
+
+    def __post_init__(self):
+        if self.placeholders is None:
+            # frozen=True → use object.__setattr__ to populate.
+            object.__setattr__(
+                self, "placeholders", PlaceholderMap(specs={"id": self.ids})
+            )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Scan":
@@ -87,20 +174,68 @@ class Scan:
             if required not in data:
                 raise ConfigError(f"scan missing required field: {required!r}")
         endpoint = data["endpoint"]
-        if "{id}" not in endpoint:
+        placeholders = PlaceholderMap.from_dict(data["ids"])
+
+        # Validate endpoint placeholders exactly match declared ID specs.
+        # v0.3 only checked that `{id}` appeared as a substring, so endpoints
+        # like `/api/x/{id}/sub/{extra}` silently shipped `{extra}` unsubstituted.
+        raw = _PLACEHOLDER_RE.findall(endpoint)
+        for name in raw:
+            if not _VALID_PLACEHOLDER_NAME.match(name):
+                raise ConfigError(
+                    f"scan {data['name']!r}: endpoint placeholder {{{name}}} "
+                    f"is not a valid name (must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+        endpoint_names = set(raw)
+        spec_names = set(placeholders.specs.keys())
+        if endpoint_names != spec_names:
+            missing = spec_names - endpoint_names
+            extra = endpoint_names - spec_names
+            errs: list[str] = []
+            if extra:
+                errs.append(
+                    f"endpoint uses {sorted(extra)} but no ID spec declared"
+                )
+            if missing:
+                errs.append(
+                    f"ID spec for {sorted(missing)} declared but endpoint "
+                    f"doesn't use it"
+                )
+            raise ConfigError(f"scan {data['name']!r}: {'; '.join(errs)}")
+
+        # v0.4-dev transitional gate. Scanner.py doesn't yet support
+        # Cartesian iteration over multi-placeholder endpoints, so a
+        # valid-looking multi-placeholder config would silently produce
+        # wrong URLs — the exact failure mode the v0.3 "silent failures
+        # are loud" thesis was written to prevent. Reject at load time
+        # until the scanner lands. When it does, delete this block, the
+        # `Scan.ids` compat shim below, and the `__post_init__` that
+        # synthesizes `placeholders` from `ids`.
+        if len(placeholders.specs) > 1:
             raise ConfigError(
-                f"scan {data['name']!r}: endpoint must contain '{{id}}' placeholder"
+                f"scan {data['name']!r}: multi-placeholder endpoints not yet "
+                f"supported by the scanner (declared placeholders: "
+                f"{sorted(placeholders.specs.keys())}). Transitional check "
+                f"in v0.4-dev; will be removed when scanner gains Cartesian "
+                f"iteration support."
             )
+
+        # Legacy `ids` field: post-gate we know there's exactly one spec.
+        # Scanner.py still reads `scan.ids`; the scanner refactor will
+        # switch it over to `placeholders`.
+        legacy_ids = next(iter(placeholders.specs.values()))
+
         methods = tuple(m.upper() for m in data.get("methods", ["GET"]))
         return cls(
             name=data["name"],
             endpoint=endpoint,
             methods=methods,
-            ids=IdSpec.from_dict(data["ids"]),
+            ids=legacy_ids,
             baseline_user=data.get("baseline_user"),
             test_users=tuple(data.get("test_users", [])),
             body=data.get("body"),
             include_unauth=bool(data.get("include_unauth", True)),
+            placeholders=placeholders,
         )
 
 

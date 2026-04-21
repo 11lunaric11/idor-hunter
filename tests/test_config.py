@@ -83,7 +83,9 @@ def test_endpoint_missing_id_placeholder(tmp_path: Path):
             endpoint: "/api/users"
             ids: {type: numeric, range: [1, 2]}
     """)
-    with pytest.raises(ConfigError, match=r"\{id\}"):
+    # v0.4 error wording: "ID spec for ['id'] declared but endpoint doesn't use it"
+    # (v0.3 said "endpoint must contain '{id}' placeholder"). Same bug caught.
+    with pytest.raises(ConfigError, match=r"endpoint doesn't use"):
         load_config(path)
 
 
