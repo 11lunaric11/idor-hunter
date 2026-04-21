@@ -63,6 +63,28 @@ class RateLimiter:
         self._last = time.monotonic()
 
 
+def _substitute(template: str, combo: dict[str, str]) -> str:
+    """Substitute every `{name}` placeholder in `template` with combo[name]."""
+    out = template
+    for name, value in combo.items():
+        out = out.replace(f"{{{name}}}", value)
+    return out
+
+
+def _combo_id(combo: dict[str, str]) -> str:
+    """Render a placeholder combination as a stable Probe.id string.
+
+    Single-placeholder scans keep the bare value so v0.3 CSVs, resume logs,
+    and analyzer grouping behave identically. Multi-placeholder scans use
+    `k=v,k=v` in declaration order — deterministic across runs (dict
+    preserves insertion order) so skip/resume keys and analyzer grouping
+    stay stable.
+    """
+    if len(combo) == 1:
+        return next(iter(combo.values()))
+    return ",".join(f"{k}={v}" for k, v in combo.items())
+
+
 def _fingerprint(body: bytes) -> tuple[str, str]:
     """Return (sha1-truncated, utf-8 preview)."""
     digest = hashlib.sha1(body).hexdigest()[:12]
@@ -146,13 +168,21 @@ def _probes_for_scan(
 
     sessions = {label: _build_session(u, config.options.verify_tls) for u, label in identities}
 
-    ids = list(scan.ids.iter_ids())
+    # v0.4: iterate over the full placeholder map so multi-placeholder
+    # endpoints (e.g. /api/org/{org_id}/item/{id}) produce the Cartesian
+    # product of URLs. Single-placeholder scans still land on Probe.id ==
+    # "<value>" for backcompat with v0.3 consumers (CSV readers, resume
+    # logs, analyzer grouping).
+    combos = [
+        (_combo_id(combo), _substitute(scan.endpoint, combo))
+        for combo in scan.placeholders.iter_combinations()
+    ]
     # Total only counts probes we'll actually issue (post-skip), so the
     # progress bar reflects remaining work, not work that was already done
     # on a prior run.
     total = sum(
         1
-        for id_value in ids
+        for id_value, _ in combos
         for _, label in identities
         for method in scan.methods
         if (scan.name, label, method, id_value) not in skip
@@ -160,8 +190,8 @@ def _probes_for_scan(
     done = 0
 
     try:
-        for id_value in ids:
-            url = config.base_url + scan.endpoint.replace("{id}", id_value)
+        for id_value, path in combos:
+            url = config.base_url + path
             for user_obj, label in identities:
                 session = sessions[label]
                 for method in scan.methods:
@@ -295,9 +325,11 @@ def run_scans_with_harvest(
 ) -> list[Probe]:
     """Run scans, harvest UUIDs from responses, then replay them.
 
-    Only scans with `ids.kind == "list"` get a second pass — the harvested
-    values are UUIDs, not numeric, so replaying them through a numeric
-    scan makes no sense.
+    Only scans with a single `list`-kind placeholder get a second pass —
+    harvested values are UUIDs, not numeric, so replaying them through a
+    numeric scan makes no sense. Multi-placeholder scans are skipped: we
+    don't know which placeholder a harvested UUID belongs to, and the
+    shadow-scan construction (`_replace_ids`) is a single-spec operation.
     """
     # Import here to avoid circular (harvester imports Probe from us).
     from .harvester import harvest_uuids
@@ -315,6 +347,17 @@ def run_scans_with_harvest(
     extra_probes: list[Probe] = []
     try:
         for scan in config.scans:
+            if len(scan.placeholders.specs) != 1:
+                # Loud skip: silent pass-over would reintroduce the v0.3-thesis
+                # failure mode (tool appears to work, secretly does less).
+                print(
+                    f"  warning: harvest disabled for scan {scan.name!r} — "
+                    f"multi-placeholder scans are not yet supported by the "
+                    f"harvester (declared placeholders: "
+                    f"{sorted(scan.placeholders.specs.keys())})",
+                    file=sys.stderr,
+                )
+                continue
             if scan.ids.kind != "list":
                 continue
             originals = set(scan.ids.iter_ids())

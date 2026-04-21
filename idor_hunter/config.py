@@ -203,26 +203,11 @@ class Scan:
                 )
             raise ConfigError(f"scan {data['name']!r}: {'; '.join(errs)}")
 
-        # v0.4-dev transitional gate. Scanner.py doesn't yet support
-        # Cartesian iteration over multi-placeholder endpoints, so a
-        # valid-looking multi-placeholder config would silently produce
-        # wrong URLs — the exact failure mode the v0.3 "silent failures
-        # are loud" thesis was written to prevent. Reject at load time
-        # until the scanner lands. When it does, delete this block, the
-        # `Scan.ids` compat shim below, and the `__post_init__` that
-        # synthesizes `placeholders` from `ids`.
-        if len(placeholders.specs) > 1:
-            raise ConfigError(
-                f"scan {data['name']!r}: multi-placeholder endpoints not yet "
-                f"supported by the scanner (declared placeholders: "
-                f"{sorted(placeholders.specs.keys())}). Transitional check "
-                f"in v0.4-dev; will be removed when scanner gains Cartesian "
-                f"iteration support."
-            )
-
-        # Legacy `ids` field: post-gate we know there's exactly one spec.
-        # Scanner.py still reads `scan.ids`; the scanner refactor will
-        # switch it over to `placeholders`.
+        # Legacy `ids` field. Scanner.py uses `scan.placeholders` directly,
+        # but the harvester still needs a single spec to build shadow scans
+        # (and skips multi-placeholder scans anyway). For multi-placeholder
+        # configs we stash the first spec as a placeholder-of-last-resort;
+        # harvester guards on `len(specs) == 1` before reading it.
         legacy_ids = next(iter(placeholders.specs.values()))
 
         methods = tuple(m.upper() for m in data.get("methods", ["GET"]))

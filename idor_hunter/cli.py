@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  users:   {len(config.users)}", file=sys.stderr)
         print(f"  scans:   {len(config.scans)}", file=sys.stderr)
         total_probes = sum(
-            s.ids.count() * len(s.methods) * (
+            s.placeholders.count() * len(s.methods) * (
                 (1 if s.include_unauth else 0)
                 + (1 if s.baseline_user else 0)
                 + len(s.test_users)

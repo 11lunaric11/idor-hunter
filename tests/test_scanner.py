@@ -9,7 +9,7 @@ import time
 
 import responses
 
-from idor_hunter.config import Config, IdSpec, Options, Scan, User
+from idor_hunter.config import Config, IdSpec, Options, PlaceholderMap, Scan, User
 from idor_hunter.scanner import RateLimiter, run_scans, run_scans_with_harvest
 
 
@@ -311,3 +311,152 @@ def test_harvest_replays_uuids_from_response_bodies():
     assert len(harvested) == 1
     assert harvested[0].id == leaked
     assert seed in harvested[0].discovered_via
+
+
+def _multi_scan(placeholders: PlaceholderMap, endpoint: str) -> Scan:
+    """Build a Scan with an explicit multi-placeholder map.
+
+    Bypasses Scan.from_dict (which historically rejected multi-placeholder
+    configs); we want to exercise the scanner layer directly.
+    """
+    return Scan(
+        name="multi",
+        endpoint=endpoint,
+        methods=("GET",),
+        ids=IdSpec(kind="numeric", start=1, end=1),  # ignored once placeholders is set
+        baseline_user="alice",
+        test_users=(),
+        include_unauth=False,
+        placeholders=placeholders,
+    )
+
+
+@responses.activate
+def test_cartesian_scanner_iteration():
+    """Two-placeholder scan produces the full Cartesian product of URLs."""
+    pm = PlaceholderMap(specs={
+        "org_id": IdSpec(kind="list", values=("acme", "globex")),
+        "id": IdSpec(kind="numeric", start=1, end=3),
+    })
+    expected_urls = {
+        f"http://target.local/api/org/{org}/item/{i}"
+        for org in ("acme", "globex")
+        for i in (1, 2, 3)
+    }
+    for url in expected_urls:
+        responses.add(responses.GET, url, json={}, status=200)
+
+    scan = _multi_scan(pm, "/api/org/{org_id}/item/{id}")
+    cfg = _minimal_config((scan,))
+
+    probes = run_scans(cfg)
+
+    assert len(probes) == 6
+    assert {p.url for p in probes} == expected_urls
+    assert all(p.status == 200 for p in probes)
+
+
+@responses.activate
+def test_cartesian_single_placeholder_unchanged():
+    """1-placeholder scan still produces value-only Probe.id (backcompat)."""
+    for i in (1, 2):
+        responses.add(
+            responses.GET, f"http://target.local/api/item/{i}", json={}, status=200
+        )
+
+    scan = Scan(
+        name="items",
+        endpoint="/api/item/{id}",
+        methods=("GET",),
+        ids=IdSpec(kind="numeric", start=1, end=2),
+        baseline_user="alice",
+        test_users=(),
+        include_unauth=False,
+    )
+    cfg = _minimal_config((scan,))
+    probes = run_scans(cfg)
+
+    assert len(probes) == 2
+    # Probe.id stays the bare value for single-placeholder scans — matters
+    # for the v0.3 pin (test_backcompat) and CSV readability.
+    assert {p.id for p in probes} == {"1", "2"}
+
+
+@responses.activate
+def test_cartesian_three_placeholders():
+    """3-placeholder scan = product of all three dimensions."""
+    pm = PlaceholderMap(specs={
+        "tenant": IdSpec(kind="list", values=("t1", "t2")),
+        "org_id": IdSpec(kind="list", values=("a", "b")),
+        "id": IdSpec(kind="numeric", start=1, end=2),
+    })
+    expected_urls = {
+        f"http://target.local/api/{t}/org/{o}/item/{i}"
+        for t in ("t1", "t2")
+        for o in ("a", "b")
+        for i in (1, 2)
+    }
+    for url in expected_urls:
+        responses.add(responses.GET, url, json={}, status=200)
+
+    scan = _multi_scan(pm, "/api/{tenant}/org/{org_id}/item/{id}")
+    cfg = _minimal_config((scan,))
+
+    probes = run_scans(cfg)
+
+    assert len(probes) == 8
+    assert {p.url for p in probes} == expected_urls
+
+
+@responses.activate
+def test_probe_id_format_multi_placeholder():
+    """Probe.id uses `k=v,k=v` format (declaration order) for multi-placeholder scans.
+
+    Single-placeholder scans keep the bare-value format (see
+    test_cartesian_single_placeholder_unchanged). The multi format has to be
+    deterministic — skip/resume keys (scan, user, method, id) need to match
+    across runs, and analyzer groups on id.
+    """
+    pm = PlaceholderMap(specs={
+        "org_id": IdSpec(kind="list", values=("acme",)),
+        "id": IdSpec(kind="numeric", start=7, end=7),
+    })
+    responses.add(
+        responses.GET, "http://target.local/api/org/acme/item/7", json={}, status=200
+    )
+    scan = _multi_scan(pm, "/api/org/{org_id}/item/{id}")
+    cfg = _minimal_config((scan,))
+
+    probes = run_scans(cfg)
+
+    assert len(probes) == 1
+    assert probes[0].id == "org_id=acme,id=7"
+
+
+@responses.activate
+def test_probe_id_grouping_consistent_across_runs():
+    """Re-running the same multi-placeholder scan produces byte-identical Probe.ids.
+
+    Analyzer groups on (scan, id, method); resume keys are (scan, user, method, id).
+    Both depend on Probe.id being deterministic across runs. This is paranoid —
+    Python 3.7+ guarantees dict insertion order, and we build the PlaceholderMap
+    from that — but the contract is load-bearing enough to pin.
+    """
+    pm = PlaceholderMap(specs={
+        "org_id": IdSpec(kind="list", values=("acme", "globex")),
+        "id": IdSpec(kind="numeric", start=1, end=2),
+    })
+    for org in ("acme", "globex"):
+        for i in (1, 2):
+            responses.add(
+                responses.GET,
+                f"http://target.local/api/org/{org}/item/{i}",
+                json={}, status=200,
+            )
+
+    def _run_once():
+        scan = _multi_scan(pm, "/api/org/{org_id}/item/{id}")
+        cfg = _minimal_config((scan,))
+        return sorted(p.id for p in run_scans(cfg))
+
+    assert _run_once() == _run_once()

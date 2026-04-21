@@ -69,57 +69,21 @@ def test_v03_single_placeholder_still_parses(tmp_path):
     assert spec.end == 3
 
 
-def test_v04_multi_placeholder_parses():
+def test_v04_multi_placeholder_parses(tmp_path):
     """New shape: each key under `ids` is a placeholder name → full map.
 
-    Tests `PlaceholderMap.from_dict` directly rather than `load_config`
-    because `Scan.from_dict` currently gates multi-placeholder configs
-    with a ConfigError (see test_multi_placeholder_rejected_until_scanner_support
-    and the transitional block in config.py). When scanner.py gains
-    Cartesian iteration, this test can go back to using `load_config`.
+    Goes through `load_config` (end-to-end) now that the v0.4-dev
+    transitional gate is gone — scanner.py supports Cartesian iteration
+    over PlaceholderMap.iter_combinations().
     """
-    pm = PlaceholderMap.from_dict({
-        "org_id": {"type": "list", "values": ["acme", "globex"]},
-        "id": {"type": "numeric", "range": [1, 50]},
-    })
+    yaml_str = _V04_YAML
+    cfg = load_config(_write_cfg(tmp_path, yaml_str))
+    pm = cfg.scans[0].placeholders
     assert set(pm.specs.keys()) == {"org_id", "id"}
     assert pm.specs["org_id"].kind == "list"
     assert pm.specs["org_id"].values == ("acme", "globex")
     assert pm.specs["id"].kind == "numeric"
     assert pm.specs["id"].end == 50
-
-
-def test_multi_placeholder_rejected_until_scanner_support(tmp_path):
-    """Transitional: multi-placeholder configs raise ConfigError in v0.4-dev.
-
-    The config layer parses multi-placeholder specs fine (see
-    test_v04_multi_placeholder_parses, which exercises PlaceholderMap
-    directly), but scanner.py doesn't yet support Cartesian iteration.
-    Until it does, Scan.from_dict rejects configs with >1 placeholder
-    rather than silently producing wrong URLs — this preserves the
-    v0.3 "silent failures are loud" thesis during the v0.4 build.
-
-    Delete this test and the gate in config.py when the scanner lands.
-    """
-    yaml_str = """
-target: {base_url: "http://t.local"}
-auth: {users: [{name: a}]}
-scans:
-  - name: s
-    endpoint: /api/org/{org_id}/item/{id}
-    methods: [GET]
-    ids:
-      org_id:
-        type: list
-        values: ["acme"]
-      id:
-        type: numeric
-        range: [1, 3]
-    baseline_user: a
-options: {}
-"""
-    with pytest.raises(ConfigError, match="multi-placeholder endpoints not yet"):
-        load_config(_write_cfg(tmp_path, yaml_str))
 
 
 def test_endpoint_missing_declared_placeholder_raises(tmp_path):
